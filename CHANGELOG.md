@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.2.2] - 2026-04-09
+
+- fix: lowercase Docker image tags in release CI
+
+
 ## [0.2.0] - 2026-04-09
 
 ### Changed

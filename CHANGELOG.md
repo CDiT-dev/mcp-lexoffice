@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.2.4] - 2026-04-15
+
+- Fix list_expenses: include paid status in default filter
+
+
 ## [0.2.3] - 2026-04-15
 
 - Add get_voucher endpoint for VAT line item details

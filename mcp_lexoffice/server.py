@@ -739,6 +739,20 @@ async def list_vouchers(
     return _fmt(result)
 
 
+@mcp.tool
+async def get_voucher(
+    ctx: Context,
+    voucher_id: Annotated[str, "UUID of the voucher"],
+) -> str:
+    """[finance] Get full details for a voucher (purchase invoice, receipt, etc.) including line items with tax amounts.
+
+    Returns voucherItems with amount, taxAmount, and taxRatePercent per line item.
+    Use this to inspect VAT (Vorsteuer) on purchase invoices."""
+    result = await _client(ctx).get_voucher(voucher_id)
+    result["deepLink"] = _deep_link(voucher_id)
+    return _fmt(result)
+
+
 # ── Payment Conditions ───────────────────────────────────────────────
 
 

@@ -288,6 +288,10 @@ class LexofficeClient:
         resp = await self._request("GET", "/voucherlist", params=params)
         return resp.json()
 
+    async def get_voucher(self, voucher_id: str) -> dict:
+        resp = await self._request("GET", f"/vouchers/{voucher_id}")
+        return resp.json()
+
     # ── Payments ─────────────────────────────────────────────────────
 
     async def get_payments(self, invoice_id: str) -> dict:

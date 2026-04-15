@@ -260,7 +260,7 @@ async def list_invoices(
     ctx: Context,
     status: Annotated[
         str | None,
-        "Filter: draft, open, paidoff, voided, overdue (comma-separated for multiple)",
+        "Filter: draft, open, paid, paidoff, voided, overdue (comma-separated for multiple)",
     ] = None,
     page: Annotated[int, "Page number (0-indexed)"] = 0,
 ) -> str:
@@ -313,14 +313,15 @@ async def upload_voucher(
 @mcp.tool
 async def list_expenses(
     ctx: Context,
-    status: Annotated[str | None, "Filter: open, paidoff, voided (comma-separated)"] = None,
+    status: Annotated[str | None, "Filter: open, paid, paidoff, voided, overdue (comma-separated). Default: open,paid,paidoff,overdue"] = None,
     page: Annotated[int, "Page number (0-indexed)"] = 0,
 ) -> str:
     """[finance] List purchase invoices and expenses.
 
     Returns purchase invoices and expenses. For filtering by voucher type, use list_vouchers instead."""
+    effective_status = status if status is not None else "open,paid,paidoff,overdue"
     result = await _client(ctx).filter_vouchers(
-        "purchaseinvoice", voucher_status=status, page=page
+        "purchaseinvoice", voucher_status=effective_status, page=page
     )
     for item in result.get("content", []):
         vid = item.get("voucherId", "")
@@ -724,7 +725,7 @@ async def list_vouchers(
         "Type: salesinvoice, creditnote, orderconfirmation, quotation, deliverynote, "
         "downpaymentinvoice, purchaseinvoice, purchasecreditnote",
     ],
-    status: Annotated[str | None, "Filter by status (comma-separated)"] = None,
+    status: Annotated[str | None, "Filter: draft, open, paid, paidoff, voided, overdue (comma-separated)"] = None,
     page: Annotated[int, "Page number (0-indexed)"] = 0,
 ) -> str:
     """[finance] List vouchers of a given type with optional status filter.

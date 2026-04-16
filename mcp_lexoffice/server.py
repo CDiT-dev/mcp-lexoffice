@@ -754,6 +754,24 @@ async def get_voucher(
     return _fmt(result)
 
 
+@mcp.tool
+async def update_voucher(
+    ctx: Context,
+    voucher_id: Annotated[str, "UUID of the voucher"],
+    version: Annotated[int, "Current version number (for optimistic locking — get from get_voucher first)"],
+    voucher_items: Annotated[str, "JSON array of updated voucher items: [{amount, taxAmount, taxRatePercent, categoryId}]"],
+) -> str:
+    """[finance] Update a voucher's line items (e.g., to fix tax rates on purchase invoices).
+
+    Get the current version and items from get_voucher first. Requires optimistic locking via version field.
+    Common use: fix vatfree purchases to correct 19% MwSt rate."""
+    import json as _json
+    items = _json.loads(voucher_items)
+    data = {"version": version, "voucherItems": items}
+    result = await _client(ctx).update_voucher(voucher_id, data)
+    return _fmt(result)
+
+
 # ── Payment Conditions ───────────────────────────────────────────────
 
 

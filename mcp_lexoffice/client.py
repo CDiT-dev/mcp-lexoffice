@@ -292,6 +292,10 @@ class LexofficeClient:
         resp = await self._request("GET", f"/vouchers/{voucher_id}")
         return resp.json()
 
+    async def update_voucher(self, voucher_id: str, data: dict) -> dict:
+        resp = await self._request("PUT", f"/vouchers/{voucher_id}", json=data)
+        return resp.json()
+
     # ── Payments ─────────────────────────────────────────────────────
 
     async def get_payments(self, invoice_id: str) -> dict:

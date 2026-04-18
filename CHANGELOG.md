@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.2.6] - 2026-04-18
+
+- feat(reliability): stateless_http + /health + fail-fast + FastMCP 3.2.4
+
+
 ## [0.2.5] - 2026-04-16
 
 - Add update_voucher tool for fixing VAT rates

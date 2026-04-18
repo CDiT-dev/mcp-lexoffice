@@ -36,8 +36,16 @@ async def lifespan(mcp: FastMCP):
 
 from .auth import BearerTokenVerifier
 
-# Build authentication (bearer token via MCP_API_KEY)
+# Build authentication (bearer token via MCP_API_KEY). Fail-fast in HTTP mode.
+# Default transport to "stdio" for this check so module imports in tests (which
+# don't set MCP_TRANSPORT) don't trigger SystemExit.
 _api_key = os.getenv("MCP_API_KEY", "")
+_transport_env = os.environ.get("MCP_TRANSPORT", "stdio")
+if _transport_env in ("http", "streamable-http") and not _api_key:
+    raise SystemExit(
+        "MCP_API_KEY is required in HTTP mode. Refusing to start "
+        "an unauthenticated server."
+    )
 _auth = BearerTokenVerifier(api_key=_api_key) if _api_key else None
 
 mcp = FastMCP(
@@ -792,6 +800,33 @@ async def list_countries(ctx: Context) -> str:
     return _fmt(result)
 
 
+from datetime import datetime, timezone as _tz  # noqa: E402
+from starlette.requests import Request as _SReq  # noqa: E402
+from starlette.responses import JSONResponse as _SResp  # noqa: E402
+
+_start_time = datetime.now(_tz.utc)
+try:
+    from mcp_lexoffice import __version__ as _version
+except ImportError:
+    _version = "0.1.0"
+
+
+@mcp.custom_route("/health", methods=["GET"])
+async def _health(request: _SReq) -> _SResp:
+    return _SResp({
+        "status": "healthy",
+        "service": "mcp-lexoffice",
+        "version": _version,
+        "upstream_reachable": True,
+        "uptime_seconds": int((datetime.now(_tz.utc) - _start_time).total_seconds()),
+    })
+
+
+@mcp.custom_route("/healthz", methods=["GET"])
+async def _healthz(request: _SReq) -> _SResp:
+    return await _health(request)
+
+
 def main():
     import os
 
@@ -799,7 +834,20 @@ def main():
     host = os.environ.get("MCP_HOST", "0.0.0.0")
     port = int(os.environ.get("MCP_PORT", "8000"))
 
-    mcp.run(transport=transport, host=host, port=port, json_response=True)
+    # Normalize legacy "http" to "streamable-http"
+    if transport == "http":
+        transport = "streamable-http"
+
+    if transport == "streamable-http":
+        mcp.run(
+            transport=transport,
+            host=host,
+            port=port,
+            json_response=True,
+            stateless_http=True,
+        )
+    else:
+        mcp.run(transport=transport, host=host, port=port, json_response=True)
 
 
 if __name__ == "__main__":

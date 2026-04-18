@@ -1558,7 +1558,11 @@ def test_main_defaults_to_streamable_http():
 
         main()
         mock_mcp.run.assert_called_once_with(
-            transport="streamable-http", host="0.0.0.0", port=8000, json_response=True
+            transport="streamable-http",
+            host="0.0.0.0",
+            port=8000,
+            json_response=True,
+            stateless_http=True,
         )
 
 

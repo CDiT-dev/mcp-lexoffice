@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.2.7] - 2026-04-19
+
+- refactor(config): add Settings with SecretStr, remove op:// subprocess
+
+
 ## [0.2.6] - 2026-04-18
 
 - feat(reliability): stateless_http + /health + fail-fast + FastMCP 3.2.4

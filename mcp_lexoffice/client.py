@@ -4,39 +4,24 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
-import subprocess
 from typing import Any
 
 import httpx
 from dotenv import load_dotenv
+
+from .config import get_settings
 
 load_dotenv()
 
 BASE_URL = "https://api.lexoffice.io/v1"
 
 
-def _resolve_api_key() -> str:
-    key = os.environ.get("LEXOFFICE_API_KEY", "")
-    if key.startswith("op://"):
-        result = subprocess.run(
-            ["op", "read", key],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(f"1Password CLI failed: {result.stderr.strip()}")
-        return result.stdout.strip()
-    return key
-
-
 class LexofficeClient:
     def __init__(self) -> None:
-        api_key = _resolve_api_key()
+        api_key = get_settings().lexoffice_api_key.get_secret_value()
         if not api_key:
             raise RuntimeError(
-                "LEXOFFICE_API_KEY must be set (raw key or op:// reference)"
+                "LEXOFFICE_API_KEY must be set (raw token injected via env or .env)"
             )
         self._client = httpx.AsyncClient(
             base_url=BASE_URL,

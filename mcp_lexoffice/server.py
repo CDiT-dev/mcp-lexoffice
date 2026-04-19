@@ -35,13 +35,11 @@ async def lifespan(mcp: FastMCP):
 
 
 from .auth import BearerTokenVerifier
+from .config import get_settings
 
-# Build authentication (bearer token via MCP_API_KEY). Fail-fast in HTTP mode.
-# Default transport to "stdio" for this check so module imports in tests (which
-# don't set MCP_TRANSPORT) don't trigger SystemExit.
-_api_key = os.getenv("MCP_API_KEY", "")
-_transport_env = os.environ.get("MCP_TRANSPORT", "stdio")
-if _transport_env in ("http", "streamable-http") and not _api_key:
+_settings = get_settings()
+_api_key = _settings.mcp_api_key.get_secret_value()
+if _settings.mcp_transport in ("http", "streamable-http") and not _api_key:
     raise SystemExit(
         "MCP_API_KEY is required in HTTP mode. Refusing to start "
         "an unauthenticated server."

@@ -10,62 +10,16 @@ import httpx
 import pytest
 import respx
 
-from mcp_lexoffice.client import LexofficeClient, _resolve_api_key, BASE_URL
+from mcp_lexoffice.client import LexofficeClient, BASE_URL
+from mcp_lexoffice.config import get_settings
 
 
-# ── API key resolution ───────────────────────────────────────────────
-
-
-class TestResolveApiKey:
-    def test_raw_key(self):
-        with patch.dict(os.environ, {"LEXOFFICE_API_KEY": "raw-key-123"}):
-            assert _resolve_api_key() == "raw-key-123"
-
-    def test_empty_key(self):
-        with patch.dict(os.environ, {"LEXOFFICE_API_KEY": ""}):
-            assert _resolve_api_key() == ""
-
-    def test_missing_key(self):
-        with patch.dict(os.environ, {}, clear=True):
-            assert _resolve_api_key() == ""
-
-    def test_op_reference_success(self):
-        with (
-            patch.dict(os.environ, {"LEXOFFICE_API_KEY": "op://vault/item/field"}),
-            patch("mcp_lexoffice.client.subprocess.run") as mock_run,
-        ):
-            mock_run.return_value.returncode = 0
-            mock_run.return_value.stdout = "  resolved-key  \n"
-            assert _resolve_api_key() == "resolved-key"
-            mock_run.assert_called_once_with(
-                ["op", "read", "op://vault/item/field"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-
-    def test_op_reference_failure(self):
-        with (
-            patch.dict(os.environ, {"LEXOFFICE_API_KEY": "op://vault/item/field"}),
-            patch("mcp_lexoffice.client.subprocess.run") as mock_run,
-        ):
-            mock_run.return_value.returncode = 1
-            mock_run.return_value.stderr = "not signed in"
-            with pytest.raises(RuntimeError, match="1Password CLI failed"):
-                _resolve_api_key()
-
-    def test_op_reference_strips_whitespace(self):
-        with (
-            patch.dict(os.environ, {"LEXOFFICE_API_KEY": "op://v/i/f"}),
-            patch("mcp_lexoffice.client.subprocess.run") as mock_run,
-        ):
-            mock_run.return_value.returncode = 0
-            mock_run.return_value.stdout = "\n\t  secret-key \n\n"
-            assert _resolve_api_key() == "secret-key"
-
-    def test_non_op_prefix_returned_as_is(self):
-        with patch.dict(os.environ, {"LEXOFFICE_API_KEY": "opaque-key-not-op-ref"}):
-            assert _resolve_api_key() == "opaque-key-not-op-ref"
+@pytest.fixture(autouse=True)
+def _clear_settings_cache():
+    """Ensure get_settings() picks up patched env vars in each test."""
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
 
 
 class TestClientInit:

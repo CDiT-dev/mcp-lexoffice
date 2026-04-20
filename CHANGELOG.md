@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.2.8] - 2026-04-20
+
+- ci(deps): enable Dependabot weekly updates
+
+
 ## [0.2.7] - 2026-04-19
 
 - refactor(config): add Settings with SecretStr, remove op:// subprocess

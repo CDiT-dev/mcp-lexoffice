@@ -35,6 +35,9 @@ jobs:
           uv sync
           uv run pytest -x || echo "Tests skipped or failed"
 
+      - name: Security audit (pip-audit)
+        run: uvx pip-audit
+
       - name: Bump version
         id: version
         run: |

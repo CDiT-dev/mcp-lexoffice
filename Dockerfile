@@ -1,11 +1,17 @@
-FROM python:3.13-slim
+FROM python:3.12-slim
 
 WORKDIR /app
 
-COPY pyproject.toml .
+ENV PYTHONUNBUFFERED=1
+
+COPY pyproject.toml README.md ./
 COPY mcp_lexoffice/ mcp_lexoffice/
 
-RUN pip install --no-cache-dir .
+RUN pip install --no-cache-dir . \
+    && addgroup --system --gid 1000 mcp \
+    && adduser --system --uid 1000 --ingroup mcp mcp
+
+USER mcp
 
 ENV MCP_TRANSPORT=streamable-http
 ENV MCP_HOST=0.0.0.0

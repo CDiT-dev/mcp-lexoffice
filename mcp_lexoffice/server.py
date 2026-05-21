@@ -46,9 +46,9 @@ mcp = FastMCP(
     instructions=(
         "MCP server for Lexware Office (Lexoffice) — invoices, contacts, quotations, "
         "and accounting. Tax regime is auto-detected from the Lexoffice profile "
-        "(vatfree, net, or gross). Payment conditions are loaded from the Lexware profile — "
-        "omit payment_condition_id to use the organization default, or pass a UUID from "
-        "list_payment_conditions. "
+        "(vatfree, net, or gross). Payment conditions: omit payment_condition_id "
+        "to let Lexware apply the contact-specific or organization default, or "
+        "pass a UUID from list_payment_conditions to override. "
         "Service catalog: Digitale Sprechstunde (EUR 995 Pauschal), Consulting "
         "(EUR 150/Stunde), Platform Development (EUR 1200/Tag). "
         "When creating invoices or quotations for existing contacts, first call "
@@ -106,10 +106,37 @@ async def _get_payment_conditions(ctx: Context, *, refresh: bool = False) -> lis
     return conditions
 
 
+def _render_payment_term_label(condition: dict) -> str:
+    """Render a payment-term label suitable for POST /invoices.
+
+    GET /payment-conditions returns paymentTermLabelTemplate with placeholders
+    ({paymentRange}, {discountRange}, {discount}); POST /invoices requires a
+    plain string (1-1000 chars). Substitute known placeholders, fall back to a
+    deterministic label if anything is left unresolved or the template is empty.
+    """
+    direct = condition.get("paymentTermLabel")
+    if isinstance(direct, str) and direct.strip():
+        return direct
+    template = condition.get("paymentTermLabelTemplate") or ""
+    duration = condition.get("paymentTermDuration", 0) or 0
+    discount = condition.get("paymentDiscountConditions") or {}
+    rendered = template.replace("{paymentRange}", str(duration))
+    if "discountRange" in discount:
+        rendered = rendered.replace("{discountRange}", str(discount["discountRange"]))
+    if "discountPercentage" in discount:
+        rendered = rendered.replace(
+            "{discount}", f"{discount['discountPercentage']:g} %"
+        )
+    rendered = rendered.strip()
+    if rendered and "{" not in rendered:
+        return rendered
+    return "Zahlbar sofort" if duration == 0 else f"Zahlbar in {duration} Tagen"
+
+
 def _embed_payment_condition(condition: dict) -> dict:
     """Copy only the fields POST /invoices accepts (whitelist, strips metadata)."""
     embed: dict[str, Any] = {
-        "paymentTermLabel": condition.get("paymentTermLabel", ""),
+        "paymentTermLabel": _render_payment_term_label(condition),
         "paymentTermDuration": condition.get("paymentTermDuration", 0),
     }
     discount = condition.get("paymentDiscountConditions")
@@ -120,7 +147,7 @@ def _embed_payment_condition(condition: dict) -> dict:
 
 def _format_condition_listing(conditions: list[dict]) -> str:
     return ", ".join(
-        f"{c.get('id', '?')}: {c.get('paymentTermLabel', '')}" for c in conditions
+        f"{c.get('id', '?')}: {_render_payment_term_label(c)}" for c in conditions
     )
 
 
@@ -131,38 +158,30 @@ async def _resolve_payment_condition(
 
     Returns a (payload, error) tuple — exactly one is not None:
       - (embed_dict, None): paymentConditions object ready for embedding
-      - (None, None): caller should omit paymentConditions (no conditions configured)
+      - (None, None): caller should omit paymentConditions — Lexware then
+        applies the contact-specific or organization default itself
       - (None, error_dict): structured error to return to the caller via _fmt
+
+    When condition_id is omitted we deliberately do NOT fetch the org default —
+    Lexware picks the right default (contact-specific takes precedence over
+    org-level) when the field is absent from the POST body.
     """
-    conditions = await _get_payment_conditions(ctx)
-    if condition_id:
-        match = next((c for c in conditions if c.get("id") == condition_id), None)
-        if match is None:
-            conditions = await _get_payment_conditions(ctx, refresh=True)
-            match = next((c for c in conditions if c.get("id") == condition_id), None)
-        if match is None:
-            return None, {
-                "error": (
-                    f"Payment condition {condition_id} not found. "
-                    f"Available: [{_format_condition_listing(conditions)}]. "
-                    f"Use list_payment_conditions to see configured conditions."
-                )
-            }
-        return _embed_payment_condition(match), None
-
-    if not conditions:
+    if not condition_id:
         return None, None
-
-    default = next((c for c in conditions if c.get("organizationDefault")), None)
-    if default is None:
+    conditions = await _get_payment_conditions(ctx)
+    match = next((c for c in conditions if c.get("id") == condition_id), None)
+    if match is None:
+        conditions = await _get_payment_conditions(ctx, refresh=True)
+        match = next((c for c in conditions if c.get("id") == condition_id), None)
+    if match is None:
         return None, {
             "error": (
-                "No organization default payment condition configured. "
-                "Specify payment_condition_id explicitly. "
-                f"Available: [{_format_condition_listing(conditions)}]"
+                f"Payment condition {condition_id} not found. "
+                f"Available: [{_format_condition_listing(conditions)}]. "
+                f"Use list_payment_conditions to see configured conditions."
             )
         }
-    return _embed_payment_condition(default), None
+    return _embed_payment_condition(match), None
 
 
 def _build_line_items(items: list[dict], *, default_tax_rate: int = 0) -> list[dict]:
@@ -235,7 +254,7 @@ async def create_draft_invoice(
     currency: Annotated[str, "Currency code"] = "EUR",
     payment_condition_id: Annotated[
         str | None,
-        "UUID of a configured Lexware payment condition (from list_payment_conditions). If omitted, the organization default is used.",
+        "UUID of a configured Lexware payment condition (from list_payment_conditions). If omitted, Lexware applies the contact-specific or organization default.",
     ] = None,
     title: Annotated[str, "Invoice title"] = "Rechnung",
     introduction: Annotated[str | None, "Introduction text above line items"] = None,
@@ -246,8 +265,8 @@ async def create_draft_invoice(
 
     Line items example: [{"name": "IT Consulting", "unit_price": 3000, "quantity": 1}]
     Tax regime is auto-detected from the Lexoffice profile. Override per-item via tax_rate field.
-    Payment conditions come from the Lexware profile: omit payment_condition_id to use the
-    organization default, or pass a UUID obtained via list_payment_conditions.
+    Payment conditions: omit payment_condition_id to let Lexware apply the contact-specific
+    or organization default, or pass a UUID from list_payment_conditions to override.
     """
     items = json.loads(line_items)
     tax_config, (pc, pc_error) = await asyncio.gather(
@@ -646,7 +665,7 @@ async def create_draft_quotation(
     expiration_date: Annotated[str | None, "Quotation expiry date (ISO format)"] = None,
     payment_condition_id: Annotated[
         str | None,
-        "UUID of a configured Lexware payment condition (from list_payment_conditions). If omitted, the organization default is used.",
+        "UUID of a configured Lexware payment condition (from list_payment_conditions). If omitted, Lexware applies the contact-specific or organization default.",
     ] = None,
     title: Annotated[str, "Quotation title"] = "Angebot",
     introduction: Annotated[str | None, "Introduction text"] = None,
@@ -655,8 +674,8 @@ async def create_draft_quotation(
 ) -> str:
     """[finance] Create a draft quotation (Angebot) in Lexware Office. Returns ID and deep link.
 
-    Payment conditions come from the Lexware profile: omit payment_condition_id to use the
-    organization default, or pass a UUID obtained via list_payment_conditions.
+    Payment conditions: omit payment_condition_id to let Lexware apply the contact-specific
+    or organization default, or pass a UUID from list_payment_conditions to override.
     """
     items = json.loads(line_items)
     tax_config, (pc, pc_error) = await asyncio.gather(

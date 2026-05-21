@@ -27,7 +27,7 @@ LEXOFFICE_API_KEY='op://Vault/item-id/API key' python -m mcp_lexoffice.server
 - Override with `LEXOFFICE_TAX_TYPE` env var for testing (skips API call)
 - Lazy-cached in `lifespan_context` — server restart clears cache
 - Per-item `tax_rate` override available on invoices, quotations, and articles
-- Payment conditions: auto-loaded from Lexware profile (organization default, override via `payment_condition_id` from `list_payment_conditions`)
+- Payment conditions: omitted by default — Lexware applies contact-specific or organization default automatically. Override via `payment_condition_id` from `list_payment_conditions` (then the template is rendered into `paymentTermLabel`).
 
 ## Tools (27 total)
 - **Invoices**: create_draft_invoice, finalize_invoice, send_invoice, get_invoice, get_invoice_pdf, list_invoices

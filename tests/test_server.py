@@ -322,25 +322,15 @@ async def test_create_draft_invoice_with_explicit_condition_id():
     assert "organizationDefault" not in pc
 
 
-async def test_create_draft_invoice_uses_organization_default():
+async def test_create_draft_invoice_omits_payment_conditions_by_default():
+    """Without an explicit payment_condition_id we omit the field so Lexware
+    applies the contact-specific or organization default itself. This also
+    avoids overriding contact-level defaults with the org default."""
     from mcp_lexoffice.server import create_draft_invoice
 
     ctx = make_ctx(
         {"create_invoice": {"id": "inv-pc-2"}},
-        payment_conditions=[
-            {
-                "id": "pc-other",
-                "paymentTermLabel": "Netto 7",
-                "paymentTermDuration": 7,
-                "organizationDefault": False,
-            },
-            {
-                "id": "pc-default",
-                "paymentTermLabel": "Zahlbar sofort",
-                "paymentTermDuration": 0,
-                "organizationDefault": True,
-            },
-        ],
+        payment_conditions=None,  # cache unset — must not be fetched
     )
     await create_draft_invoice(
         ctx,
@@ -348,10 +338,8 @@ async def test_create_draft_invoice_uses_organization_default():
         line_items='[{"name": "A", "unit_price": 1}]',
     )
     call_data = ctx.lifespan_context["lexoffice"].create_invoice.call_args[0][0]
-    pc = call_data["paymentConditions"]
-    assert pc["paymentTermLabel"] == "Zahlbar sofort"
-    assert pc["paymentTermDuration"] == 0
-    assert "id" not in pc
+    assert "paymentConditions" not in call_data
+    ctx.lifespan_context["lexoffice"].list_payment_conditions.assert_not_called()
 
 
 async def test_create_draft_invoice_explicit_id_overrides_default():
@@ -436,61 +424,12 @@ async def test_create_draft_invoice_invalid_id_returns_error_after_refresh():
     ctx.lifespan_context["lexoffice"].create_invoice.assert_not_called()
 
 
-async def test_create_draft_invoice_empty_conditions_skips_field():
-    from mcp_lexoffice.server import create_draft_invoice
-
-    ctx = make_ctx(
-        {"create_invoice": {"id": "inv-pc-6"}},
-        payment_conditions=[],
-    )
-    await create_draft_invoice(
-        ctx,
-        recipient_name="Test",
-        line_items='[{"name": "A", "unit_price": 1}]',
-    )
-    call_data = ctx.lifespan_context["lexoffice"].create_invoice.call_args[0][0]
-    assert "paymentConditions" not in call_data
-
-
-async def test_create_draft_invoice_no_default_marked_returns_error():
-    from mcp_lexoffice.server import create_draft_invoice
-
-    ctx = make_ctx(
-        {"create_invoice": {"id": "inv-pc-7"}},
-        payment_conditions=[
-            {
-                "id": "pc-a",
-                "paymentTermLabel": "Netto 7",
-                "paymentTermDuration": 7,
-                "organizationDefault": False,
-            },
-            {
-                "id": "pc-b",
-                "paymentTermLabel": "Netto 14",
-                "paymentTermDuration": 14,
-                "organizationDefault": False,
-            },
-        ],
-    )
-    result = await create_draft_invoice(
-        ctx,
-        recipient_name="Test",
-        line_items='[{"name": "A", "unit_price": 1}]',
-    )
-    parsed = json.loads(result)
-    assert "error" in parsed
-    assert "pc-a" in parsed["error"]
-    assert "pc-b" in parsed["error"]
-    ctx.lifespan_context["lexoffice"].create_invoice.assert_not_called()
-
-
 async def test_create_draft_invoice_preserves_discount_conditions():
     from mcp_lexoffice.server import create_draft_invoice
 
     discount = {
-        "paymentDiscountType": "PERCENTAGE",
-        "paymentDiscountValue": 2,
-        "paymentDiscountRange": 10,
+        "discountPercentage": 2,
+        "discountRange": 10,
     }
     ctx = make_ctx(
         {"create_invoice": {"id": "inv-pc-8"}},
@@ -508,6 +447,7 @@ async def test_create_draft_invoice_preserves_discount_conditions():
         ctx,
         recipient_name="Test",
         line_items='[{"name": "A", "unit_price": 1}]',
+        payment_condition_id="pc-discount",
     )
     call_data = ctx.lifespan_context["lexoffice"].create_invoice.call_args[0][0]
     assert call_data["paymentConditions"]["paymentDiscountConditions"] == discount
@@ -531,21 +471,155 @@ async def test_create_draft_invoice_payment_term_duration_zero():
         ctx,
         recipient_name="Test",
         line_items='[{"name": "A", "unit_price": 1}]',
+        payment_condition_id="pc-sofort",
     )
     call_data = ctx.lifespan_context["lexoffice"].create_invoice.call_args[0][0]
     assert call_data["paymentConditions"]["paymentTermDuration"] == 0
     assert "Zahlbar sofort" in call_data["paymentConditions"]["paymentTermLabel"]
 
 
-async def test_create_draft_quotation_uses_organization_default():
+async def test_create_draft_quotation_omits_payment_conditions_by_default():
+    """Mirror of invoice: omit paymentConditions so Lexware applies its own default."""
     from mcp_lexoffice.server import create_draft_quotation
 
     ctx = make_ctx(
         {"create_quotation": {"id": "q-pc-1"}},
+        payment_conditions=None,
+    )
+    await create_draft_quotation(
+        ctx,
+        recipient_name="Test",
+        line_items='[{"name": "A", "unit_price": 1}]',
+    )
+    call_data = ctx.lifespan_context["lexoffice"].create_quotation.call_args[0][0]
+    assert "paymentConditions" not in call_data
+    ctx.lifespan_context["lexoffice"].list_payment_conditions.assert_not_called()
+
+
+# ── Payment term label rendering (real API schema with templates) ────
+
+
+def test_render_payment_term_label_substitutes_payment_range():
+    from mcp_lexoffice.server import _render_payment_term_label
+
+    label = _render_payment_term_label(
+        {
+            "paymentTermLabelTemplate": "Zahlbar in {paymentRange} Tagen, rein netto ohne Abzug",
+            "paymentTermDuration": 14,
+        }
+    )
+    assert label == "Zahlbar in 14 Tagen, rein netto ohne Abzug"
+
+
+def test_render_payment_term_label_substitutes_discount_placeholders():
+    from mcp_lexoffice.server import _render_payment_term_label
+
+    label = _render_payment_term_label(
+        {
+            "paymentTermLabelTemplate": "{discountRange} Tage -{discount}, {paymentRange} Tage netto",
+            "paymentTermDuration": 30,
+            "paymentDiscountConditions": {
+                "discountRange": 10,
+                "discountPercentage": 3,
+            },
+        }
+    )
+    assert label == "10 Tage -3 %, 30 Tage netto"
+
+
+def test_render_payment_term_label_passes_static_template_through():
+    from mcp_lexoffice.server import _render_payment_term_label
+
+    label = _render_payment_term_label(
+        {
+            "paymentTermLabelTemplate": "Zahlbar sofort, rein netto",
+            "paymentTermDuration": 0,
+        }
+    )
+    assert label == "Zahlbar sofort, rein netto"
+
+
+def test_render_payment_term_label_uses_direct_label_when_present():
+    from mcp_lexoffice.server import _render_payment_term_label
+
+    # Defensive backward-compat path: if the API ever returns a pre-rendered
+    # label, prefer it over the template.
+    label = _render_payment_term_label(
+        {
+            "paymentTermLabel": "Pre-rendered Label",
+            "paymentTermLabelTemplate": "ignored {paymentRange}",
+            "paymentTermDuration": 7,
+        }
+    )
+    assert label == "Pre-rendered Label"
+
+
+def test_render_payment_term_label_falls_back_when_template_missing():
+    from mcp_lexoffice.server import _render_payment_term_label
+
+    assert (
+        _render_payment_term_label({"paymentTermDuration": 14})
+        == "Zahlbar in 14 Tagen"
+    )
+    assert _render_payment_term_label({"paymentTermDuration": 0}) == "Zahlbar sofort"
+    assert _render_payment_term_label({}) == "Zahlbar sofort"
+
+
+def test_render_payment_term_label_falls_back_on_unresolved_placeholder():
+    from mcp_lexoffice.server import _render_payment_term_label
+
+    # Discount data missing but template references {discount}/{discountRange}
+    # → don't ship a label with literal "{...}" in it; use the deterministic
+    # fallback instead.
+    label = _render_payment_term_label(
+        {
+            "paymentTermLabelTemplate": "{discountRange} Tage -{discount}, {paymentRange} Tage netto",
+            "paymentTermDuration": 30,
+        }
+    )
+    assert label == "Zahlbar in 30 Tagen"
+
+
+async def test_create_draft_invoice_renders_template_when_id_is_explicit():
+    """Regression test for the 406 bug: when the user passes an explicit
+    payment_condition_id, GET /payment-conditions returns paymentTermLabelTemplate
+    (not paymentTermLabel), and we must render it before POSTing to /invoices."""
+    from mcp_lexoffice.server import create_draft_invoice
+
+    ctx = make_ctx(
+        {"create_invoice": {"id": "inv-tpl-1"}},
         payment_conditions=[
             {
-                "id": "pc-default",
-                "paymentTermLabel": "Netto 14",
+                "id": "pc-tpl",
+                "paymentTermLabelTemplate": "Zahlbar in {paymentRange} Tagen, rein netto ohne Abzug",
+                "paymentTermDuration": 7,
+                "organizationDefault": True,
+            }
+        ],
+    )
+    await create_draft_invoice(
+        ctx,
+        recipient_name="Test",
+        line_items='[{"name": "A", "unit_price": 1}]',
+        payment_condition_id="pc-tpl",
+    )
+    call_data = ctx.lifespan_context["lexoffice"].create_invoice.call_args[0][0]
+    pc = call_data["paymentConditions"]
+    assert pc["paymentTermLabel"] == "Zahlbar in 7 Tagen, rein netto ohne Abzug"
+    assert pc["paymentTermDuration"] == 7
+    # Regression: never ship an empty label (API rejects with 406).
+    assert pc["paymentTermLabel"] != ""
+
+
+async def test_create_draft_quotation_renders_template_when_id_is_explicit():
+    from mcp_lexoffice.server import create_draft_quotation
+
+    ctx = make_ctx(
+        {"create_quotation": {"id": "q-tpl-1"}},
+        payment_conditions=[
+            {
+                "id": "pc-tpl",
+                "paymentTermLabelTemplate": "Zahlbar in {paymentRange} Tagen, rein netto ohne Abzug",
                 "paymentTermDuration": 14,
                 "organizationDefault": True,
             }
@@ -555,10 +629,13 @@ async def test_create_draft_quotation_uses_organization_default():
         ctx,
         recipient_name="Test",
         line_items='[{"name": "A", "unit_price": 1}]',
+        payment_condition_id="pc-tpl",
     )
     call_data = ctx.lifespan_context["lexoffice"].create_quotation.call_args[0][0]
-    assert call_data["paymentConditions"]["paymentTermLabel"] == "Netto 14"
-    assert call_data["paymentConditions"]["paymentTermDuration"] == 14
+    assert (
+        call_data["paymentConditions"]["paymentTermLabel"]
+        == "Zahlbar in 14 Tagen, rein netto ohne Abzug"
+    )
 
 
 async def test_create_draft_invoice_with_introduction_and_remark():

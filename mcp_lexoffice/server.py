@@ -289,7 +289,7 @@ async def list_invoices(
     (created via UI/API) and bookkeeping vouchers (Belege). Items with status
     'unchecked' are uploaded documents, not proper invoices."""
     result = await _client(ctx).filter_vouchers(
-        "salesinvoice", voucher_status=status, page=page
+        "salesinvoice,invoice", voucher_status=status, page=page
     )
     today = date.today()
     for item in result.get("content", []):
@@ -360,9 +360,9 @@ async def get_financial_overview(
 
     months defaults to 6, maximum 12. Large ranges may be slow as it queries all settled invoices."""
     months = max(1, min(12, months))
-    sales = await _client(ctx).filter_vouchers("salesinvoice", voucher_status="paidoff", size=250)
+    sales = await _client(ctx).filter_vouchers("salesinvoice,invoice", voucher_status="paidoff", size=250)
     purchases = await _client(ctx).filter_vouchers("purchaseinvoice", voucher_status="paidoff", size=250)
-    open_invoices = await _client(ctx).filter_vouchers("salesinvoice", voucher_status="open", size=250)
+    open_invoices = await _client(ctx).filter_vouchers("salesinvoice,invoice", voucher_status="open", size=250)
 
     today = date.today()
     monthly: dict[str, dict[str, float]] = {}
@@ -414,7 +414,7 @@ async def get_payment_status(
         return _fmt(result)
 
     if contact_name:
-        vouchers = await _client(ctx).filter_vouchers("salesinvoice", voucher_status="open", size=250)
+        vouchers = await _client(ctx).filter_vouchers("salesinvoice,invoice", voucher_status="open", size=250)
         matches = [
             v for v in vouchers.get("content", [])
             if contact_name.lower() in v.get("contactName", "").lower()
@@ -746,9 +746,9 @@ async def list_vouchers(
     ctx: Context,
     voucher_type: Annotated[
         Literal[
-            "creditnote", "orderconfirmation", "quotation", "deliverynote",
-            "downpaymentinvoice", "purchasecreditnote",
-            "salesinvoice", "purchaseinvoice",
+            "invoice", "salesinvoice", "creditnote", "orderconfirmation",
+            "quotation", "deliverynote", "downpaymentinvoice",
+            "purchaseinvoice", "purchasecreditnote",
         ],
         "Voucher type to list",
     ],
@@ -1007,7 +1007,7 @@ async def get_contact_invoices(
         contact_id = matches[0].get("id", "")
 
     result = await _client(ctx).filter_vouchers(
-        "salesinvoice", voucher_status=status, contact_id=contact_id
+        "salesinvoice,invoice", voucher_status=status, contact_id=contact_id
     )
     today = date.today()
     for item in result.get("content", []):

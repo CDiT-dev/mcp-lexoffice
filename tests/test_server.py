@@ -602,7 +602,7 @@ async def test_list_invoices_passes_status_and_page():
     ctx = make_ctx({"filter_vouchers": {"content": []}})
     await list_invoices(ctx, status="draft", page=3)
     call_kwargs = ctx.lifespan_context["lexoffice"].filter_vouchers.call_args
-    assert call_kwargs[0][0] == "salesinvoice"
+    assert call_kwargs[0][0] == "salesinvoice,invoice"
     assert call_kwargs[1]["voucher_status"] == "draft"
     assert call_kwargs[1]["page"] == 3
 

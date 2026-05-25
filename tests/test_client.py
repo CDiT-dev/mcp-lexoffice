@@ -610,6 +610,47 @@ async def test_404_propagates(client, mock_api):
     assert exc_info.value.response.status_code == 404
 
 
+# ── get_invoice_or_voucher fallback ─────────────────────────────────
+
+
+async def test_get_invoice_or_voucher_resolves_invoice(client, mock_api):
+    """When /invoices/{id} succeeds, return invoice data with _resolvedVia=invoices."""
+    mock_api.get("/invoices/inv-001").respond(
+        200, json={"id": "inv-001", "voucherStatus": "open"}
+    )
+    result = await client.get_invoice_or_voucher("inv-001")
+    assert result["id"] == "inv-001"
+    assert result["_resolvedVia"] == "invoices"
+
+
+async def test_get_invoice_or_voucher_falls_back_to_voucher(client, mock_api):
+    """When /invoices/{id} returns 404, fall back to /vouchers/{id}."""
+    mock_api.get("/invoices/beleg-001").respond(404, json={"message": "Not found"})
+    mock_api.get("/vouchers/beleg-001").respond(
+        200, json={"id": "beleg-001", "type": "salesinvoice", "voucherStatus": "unchecked"}
+    )
+    result = await client.get_invoice_or_voucher("beleg-001")
+    assert result["id"] == "beleg-001"
+    assert result["_resolvedVia"] == "vouchers"
+
+
+async def test_get_invoice_or_voucher_propagates_non_404(client, mock_api):
+    """Non-404 errors from /invoices/{id} should propagate, not fall back."""
+    mock_api.get("/invoices/inv-403").respond(403, json={"message": "Forbidden"})
+    with pytest.raises(httpx.HTTPStatusError) as exc_info:
+        await client.get_invoice_or_voucher("inv-403")
+    assert exc_info.value.response.status_code == 403
+
+
+async def test_get_invoice_or_voucher_both_404(client, mock_api):
+    """When both /invoices and /vouchers return 404, the voucher 404 propagates."""
+    mock_api.get("/invoices/gone").respond(404, json={"message": "Not found"})
+    mock_api.get("/vouchers/gone").respond(404, json={"message": "Not found"})
+    with pytest.raises(httpx.HTTPStatusError) as exc_info:
+        await client.get_invoice_or_voucher("gone")
+    assert exc_info.value.response.status_code == 404
+
+
 async def test_400_bad_request(client, mock_api):
     mock_api.post("/contacts").respond(400, json={"message": "Bad request"})
     with pytest.raises(httpx.HTTPStatusError) as exc_info:

@@ -140,6 +140,24 @@ class LexofficeClient:
         resp = await self._request("GET", f"/invoices/{invoice_id}")
         return resp.json()
 
+    async def get_invoice_or_voucher(self, resource_id: str) -> dict:
+        """Try /invoices/{id} first; on 404, fall back to /vouchers/{id}.
+
+        The voucherlist endpoint can return IDs for both Invoice API objects
+        and bookkeeping vouchers (Belege). This method resolves either."""
+        try:
+            resp = await self._request("GET", f"/invoices/{resource_id}")
+            result = resp.json()
+            result["_resolvedVia"] = "invoices"
+            return result
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code != 404:
+                raise
+        resp = await self._request("GET", f"/vouchers/{resource_id}")
+        result = resp.json()
+        result["_resolvedVia"] = "vouchers"
+        return result
+
     async def finalize_invoice(self, invoice_id: str) -> dict:
         resp = await self._request("GET", f"/invoices/{invoice_id}")
         data = resp.json()
@@ -261,6 +279,7 @@ class LexofficeClient:
         voucher_type: str,
         *,
         voucher_status: str | None = None,
+        contact_id: str | None = None,
         page: int = 0,
         size: int = 100,
     ) -> dict:
@@ -270,6 +289,8 @@ class LexofficeClient:
             "voucherType": voucher_type,
         }
         params["voucherStatus"] = voucher_status or "any"
+        if contact_id:
+            params["contactId"] = contact_id
         resp = await self._request("GET", "/voucherlist", params=params)
         return resp.json()
 

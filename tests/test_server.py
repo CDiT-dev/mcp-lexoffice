@@ -204,13 +204,16 @@ async def test_all_tools_registered():
         "create_dunning", "render_dunning_pdf",
         "list_articles", "create_article", "get_article", "update_article",
         "list_vouchers", "list_payment_conditions", "list_countries",
+        "create_and_send_invoice", "find_or_create_contact",
+        "convert_quotation_and_send", "list_quotations",
+        "get_contact_invoices", "create_credit_note",
     }
     assert expected == names
 
 
-async def test_tool_count_is_27():
+async def test_tool_count():
     tools = await mcp.list_tools()
-    assert len(tools) == 30
+    assert len(tools) == 36
 
 
 # ── Profile tool ─────────────────────────────────────────────────────
@@ -243,7 +246,7 @@ async def test_create_draft_invoice_tool():
     result = await create_draft_invoice(
         ctx,
         recipient_name="Acme GmbH",
-        line_items='[{"name": "Consulting", "unit_price": 3000, "quantity": 1}]',
+        line_items=[{"name": "Consulting", "unit_price": 3000, "quantity": 1}],
     )
     parsed = json.loads(result)
     assert parsed["id"] == "inv-1"
@@ -262,7 +265,7 @@ async def test_create_draft_invoice_deep_link_is_edit():
     result = await create_draft_invoice(
         ctx,
         recipient_name="Test",
-        line_items='[{"name": "A", "unit_price": 1}]',
+        line_items=[{"name": "A", "unit_price": 1}],
     )
     parsed = json.loads(result)
     assert "/edit/" in parsed["deepLink"]
@@ -275,7 +278,7 @@ async def test_create_draft_invoice_with_payment_terms():
     await create_draft_invoice(
         ctx,
         recipient_name="Test",
-        line_items='[{"name": "A", "unit_price": 1}]',
+        line_items=[{"name": "A", "unit_price": 1}],
         payment_term_duration=14,
     )
     call_data = ctx.lifespan_context["lexoffice"].create_invoice.call_args[0][0]
@@ -290,7 +293,7 @@ async def test_create_draft_invoice_no_payment_terms():
     await create_draft_invoice(
         ctx,
         recipient_name="Test",
-        line_items='[{"name": "A", "unit_price": 1}]',
+        line_items=[{"name": "A", "unit_price": 1}],
     )
     call_data = ctx.lifespan_context["lexoffice"].create_invoice.call_args[0][0]
     assert "paymentConditions" not in call_data
@@ -303,7 +306,7 @@ async def test_create_draft_invoice_with_introduction_and_remark():
     await create_draft_invoice(
         ctx,
         recipient_name="Test",
-        line_items='[{"name": "A", "unit_price": 1}]',
+        line_items=[{"name": "A", "unit_price": 1}],
         introduction="Sehr geehrte Damen und Herren",
         remark="Vielen Dank",
     )
@@ -319,7 +322,7 @@ async def test_create_draft_invoice_without_introduction_and_remark():
     await create_draft_invoice(
         ctx,
         recipient_name="Test",
-        line_items='[{"name": "A", "unit_price": 1}]',
+        line_items=[{"name": "A", "unit_price": 1}],
     )
     call_data = ctx.lifespan_context["lexoffice"].create_invoice.call_args[0][0]
     assert "introduction" not in call_data
@@ -333,7 +336,7 @@ async def test_create_draft_invoice_full_address():
     await create_draft_invoice(
         ctx,
         recipient_name="Firma XY",
-        line_items='[{"name": "A", "unit_price": 1}]',
+        line_items=[{"name": "A", "unit_price": 1}],
         street="Musterstr. 1",
         zip_code="12345",
         city="Berlin",
@@ -355,7 +358,7 @@ async def test_create_draft_invoice_custom_title():
     await create_draft_invoice(
         ctx,
         recipient_name="Test",
-        line_items='[{"name": "A", "unit_price": 1}]',
+        line_items=[{"name": "A", "unit_price": 1}],
         title="Custom Invoice Title",
     )
     call_data = ctx.lifespan_context["lexoffice"].create_invoice.call_args[0][0]
@@ -369,7 +372,7 @@ async def test_create_draft_invoice_default_title():
     await create_draft_invoice(
         ctx,
         recipient_name="Test",
-        line_items='[{"name": "A", "unit_price": 1}]',
+        line_items=[{"name": "A", "unit_price": 1}],
     )
     call_data = ctx.lifespan_context["lexoffice"].create_invoice.call_args[0][0]
     assert call_data["title"] == "Rechnung"
@@ -382,7 +385,7 @@ async def test_create_draft_invoice_currency():
     await create_draft_invoice(
         ctx,
         recipient_name="Test",
-        line_items='[{"name": "A", "unit_price": 1}]',
+        line_items=[{"name": "A", "unit_price": 1}],
         currency="USD",
     )
     call_data = ctx.lifespan_context["lexoffice"].create_invoice.call_args[0][0]
@@ -392,7 +395,10 @@ async def test_create_draft_invoice_currency():
 async def test_finalize_invoice_tool():
     from mcp_lexoffice.server import finalize_invoice
 
-    ctx = make_ctx({"finalize_invoice": {"id": "inv-1", "voucherNumber": "RE-2026-001"}})
+    ctx = make_ctx({
+        "finalize_invoice": {"id": "inv-1"},
+        "get_invoice": {"id": "inv-1", "voucherNumber": "RE-2026-001", "voucherStatus": "open"},
+    })
     result = await finalize_invoice(ctx, invoice_id="inv-1")
     parsed = json.loads(result)
     assert parsed["voucherNumber"] == "RE-2026-001"
@@ -403,7 +409,10 @@ async def test_finalize_invoice_deep_link_is_view():
     """Finalized invoice deep link should use 'view', not 'edit'."""
     from mcp_lexoffice.server import finalize_invoice
 
-    ctx = make_ctx({"finalize_invoice": {"id": "inv-1"}})
+    ctx = make_ctx({
+        "finalize_invoice": {"id": "inv-1"},
+        "get_invoice": {"id": "inv-1", "voucherStatus": "open"},
+    })
     result = await finalize_invoice(ctx, invoice_id="inv-1")
     parsed = json.loads(result)
     assert "/view/" in parsed["deepLink"]
@@ -451,12 +460,12 @@ async def test_send_invoice_paidoff_status_allowed():
 async def test_get_invoice_tool_deep_link():
     from mcp_lexoffice.server import get_invoice
 
-    ctx = make_ctx({"get_invoice": {"id": "inv-1", "voucherStatus": "draft"}})
+    ctx = make_ctx({"get_invoice_or_voucher": {"id": "inv-1", "voucherStatus": "draft", "_resolvedVia": "invoices"}})
     result = await get_invoice(ctx, invoice_id="inv-1")
     parsed = json.loads(result)
     assert "edit" in parsed["deepLink"]
 
-    ctx2 = make_ctx({"get_invoice": {"id": "inv-2", "voucherStatus": "open"}})
+    ctx2 = make_ctx({"get_invoice_or_voucher": {"id": "inv-2", "voucherStatus": "open", "_resolvedVia": "invoices"}})
     result2 = await get_invoice(ctx2, invoice_id="inv-2")
     parsed2 = json.loads(result2)
     assert "view" in parsed2["deepLink"]
@@ -465,7 +474,7 @@ async def test_get_invoice_tool_deep_link():
 async def test_get_invoice_tool_returns_valid_json():
     from mcp_lexoffice.server import get_invoice
 
-    ctx = make_ctx({"get_invoice": {"id": "inv-1", "voucherStatus": "open", "totalAmount": 1500}})
+    ctx = make_ctx({"get_invoice_or_voucher": {"id": "inv-1", "voucherStatus": "open", "totalAmount": 1500, "_resolvedVia": "invoices"}})
     result = await get_invoice(ctx, invoice_id="inv-1")
     parsed = json.loads(result)
     assert parsed["totalAmount"] == 1500
@@ -596,6 +605,81 @@ async def test_list_invoices_passes_status_and_page():
     assert call_kwargs[0][0] == "salesinvoice"
     assert call_kwargs[1]["voucher_status"] == "draft"
     assert call_kwargs[1]["page"] == 3
+
+
+async def test_list_invoices_unchecked_beleg_tagged():
+    """Items with status 'unchecked' should be tagged as Belege."""
+    from mcp_lexoffice.server import list_invoices
+
+    ctx = make_ctx({
+        "filter_vouchers": {
+            "content": [
+                {"voucherId": "beleg-1", "voucherStatus": "unchecked", "totalAmount": 4.0},
+            ]
+        }
+    })
+    result = await list_invoices(ctx)
+    parsed = json.loads(result)
+    item = parsed["content"][0]
+    assert "_note" in item
+    assert "Beleg" in item["_note"]
+    assert "deepLink" in item
+
+
+async def test_list_invoices_mixed_invoice_and_beleg():
+    """Normal invoices should not get the Beleg _note tag."""
+    from mcp_lexoffice.server import list_invoices
+
+    ctx = make_ctx({
+        "filter_vouchers": {
+            "content": [
+                {"voucherId": "inv-1", "voucherStatus": "open", "dueDate": "2099-12-31"},
+                {"voucherId": "beleg-1", "voucherStatus": "unchecked"},
+            ]
+        }
+    })
+    result = await list_invoices(ctx)
+    parsed = json.loads(result)
+    assert "_note" not in parsed["content"][0]
+    assert "_note" in parsed["content"][1]
+
+
+# ── get_invoice fallback ────────────────────────────────────────────
+
+
+async def test_get_invoice_tool_voucher_fallback():
+    """get_invoice should work for Belege via the fallback, with a _note."""
+    from mcp_lexoffice.server import get_invoice
+
+    ctx = make_ctx({
+        "get_invoice_or_voucher": {
+            "id": "beleg-1",
+            "voucherStatus": "unchecked",
+            "_resolvedVia": "vouchers",
+        }
+    })
+    result = await get_invoice(ctx, invoice_id="beleg-1")
+    parsed = json.loads(result)
+    assert "_note" in parsed
+    assert "Beleg" in parsed["_note"]
+    assert "deepLink" in parsed
+
+
+async def test_get_invoice_tool_invoice_no_note():
+    """get_invoice for a real Invoice API object should not have a Beleg _note."""
+    from mcp_lexoffice.server import get_invoice
+
+    ctx = make_ctx({
+        "get_invoice_or_voucher": {
+            "id": "inv-1",
+            "voucherStatus": "open",
+            "_resolvedVia": "invoices",
+        }
+    })
+    result = await get_invoice(ctx, invoice_id="inv-1")
+    parsed = json.loads(result)
+    assert "_note" not in parsed
+    assert "deepLink" in parsed
 
 
 # ── Voucher upload ───────────────────────────────────────────────────
@@ -1098,15 +1182,14 @@ async def test_update_contact_tool():
     mock_client.update_contact.return_value = {"id": "c-1", "version": 2}
     ctx = FakeContext(mock_client)
 
-    result = await update_contact(ctx, contact_id="c-1", version=2, company_name="New Name")
+    result = await update_contact(ctx, contact_id="c-1", company_name="New Name")
     parsed = json.loads(result)
     assert parsed["version"] == 2
     assert "deepLink" in parsed
 
-    # Check that existing data was merged
     update_data = mock_client.update_contact.call_args[0][1]
     assert update_data["company"]["name"] == "New Name"
-    assert update_data["version"] == 2
+    assert update_data["version"] == 1
 
 
 async def test_update_contact_person_fields():
@@ -1121,7 +1204,7 @@ async def test_update_contact_person_fields():
     mock_client.update_contact.return_value = {"id": "c-2", "version": 1}
     ctx = FakeContext(mock_client)
 
-    await update_contact(ctx, contact_id="c-2", version=1, first_name="Moritz", last_name="Neu")
+    await update_contact(ctx, contact_id="c-2", first_name="Moritz", last_name="Neu")
     update_data = mock_client.update_contact.call_args[0][1]
     assert update_data["person"]["firstName"] == "Moritz"
     assert update_data["person"]["lastName"] == "Neu"
@@ -1135,7 +1218,7 @@ async def test_update_contact_email():
     mock_client.update_contact.return_value = {"id": "c-3", "version": 1}
     ctx = FakeContext(mock_client)
 
-    await update_contact(ctx, contact_id="c-3", version=1, email="new@test.de")
+    await update_contact(ctx, contact_id="c-3", email="new@test.de")
     update_data = mock_client.update_contact.call_args[0][1]
     assert update_data["emailAddresses"]["business"] == ["new@test.de"]
 
@@ -1149,7 +1232,7 @@ async def test_update_contact_no_changes():
     mock_client.update_contact.return_value = {"id": "c-4", "version": 1}
     ctx = FakeContext(mock_client)
 
-    result = await update_contact(ctx, contact_id="c-4", version=1)
+    result = await update_contact(ctx, contact_id="c-4")
     parsed = json.loads(result)
     assert parsed["version"] == 1
 
@@ -1164,7 +1247,7 @@ async def test_create_draft_quotation_tool():
     result = await create_draft_quotation(
         ctx,
         recipient_name="Test Client",
-        line_items='[{"name": "Service", "unit_price": 500}]',
+        line_items=[{"name": "Service", "unit_price": 500}],
     )
     parsed = json.loads(result)
     assert parsed["id"] == "q-1"
@@ -1179,7 +1262,7 @@ async def test_create_draft_quotation_with_expiration():
     await create_draft_quotation(
         ctx,
         recipient_name="Test",
-        line_items='[{"name": "A", "unit_price": 1}]',
+        line_items=[{"name": "A", "unit_price": 1}],
         expiration_date="2026-04-01",
     )
     call_data = ctx.lifespan_context["lexoffice"].create_quotation.call_args[0][0]
@@ -1193,7 +1276,7 @@ async def test_create_draft_quotation_without_expiration():
     await create_draft_quotation(
         ctx,
         recipient_name="Test",
-        line_items='[{"name": "A", "unit_price": 1}]',
+        line_items=[{"name": "A", "unit_price": 1}],
     )
     call_data = ctx.lifespan_context["lexoffice"].create_quotation.call_args[0][0]
     assert "expirationDate" not in call_data
@@ -1206,7 +1289,7 @@ async def test_create_draft_quotation_with_introduction_remark():
     await create_draft_quotation(
         ctx,
         recipient_name="Test",
-        line_items='[{"name": "A", "unit_price": 1}]',
+        line_items=[{"name": "A", "unit_price": 1}],
         introduction="Hello",
         remark="Thanks",
     )
@@ -1222,7 +1305,7 @@ async def test_create_draft_quotation_default_title():
     await create_draft_quotation(
         ctx,
         recipient_name="Test",
-        line_items='[{"name": "A", "unit_price": 1}]',
+        line_items=[{"name": "A", "unit_price": 1}],
     )
     call_data = ctx.lifespan_context["lexoffice"].create_quotation.call_args[0][0]
     assert call_data["title"] == "Angebot"
@@ -1235,7 +1318,7 @@ async def test_create_draft_quotation_vatfree():
     await create_draft_quotation(
         ctx,
         recipient_name="Test",
-        line_items='[{"name": "A", "unit_price": 1}]',
+        line_items=[{"name": "A", "unit_price": 1}],
     )
     call_data = ctx.lifespan_context["lexoffice"].create_quotation.call_args[0][0]
     assert call_data["taxConditions"]["taxType"] == "vatfree"
@@ -1244,7 +1327,10 @@ async def test_create_draft_quotation_vatfree():
 async def test_finalize_quotation_tool():
     from mcp_lexoffice.server import finalize_quotation
 
-    ctx = make_ctx({"finalize_quotation": {"id": "q-1", "voucherNumber": "AG-001"}})
+    ctx = make_ctx({
+        "finalize_quotation": {"id": "q-1"},
+        "get_quotation": {"id": "q-1", "voucherNumber": "AG-001", "voucherStatus": "open"},
+    })
     result = await finalize_quotation(ctx, quotation_id="q-1")
     parsed = json.loads(result)
     assert parsed["voucherNumber"] == "AG-001"
@@ -1400,18 +1486,18 @@ async def test_update_article_tool():
     mock_client.update_article.return_value = {"id": "a-1", "version": 3}
     ctx = FakeContext(mock_client)
 
-    result = await update_article(ctx, article_id="a-1", version=3, name="New Name", net_price=200.0)
+    result = await update_article(ctx, article_id="a-1", name="New Name", net_price=200.0)
     parsed = json.loads(result)
     assert parsed["version"] == 3
 
     update_data = mock_client.update_article.call_args[0][1]
     assert update_data["title"] == "New Name"
     assert update_data["price"]["netPrice"] == 200.0
-    assert update_data["version"] == 3
+    assert update_data["version"] == 2
 
 
 async def test_update_article_version_handling():
-    """update_article should override version with the provided one."""
+    """update_article should use the fetched version automatically."""
     from mcp_lexoffice.server import update_article
 
     mock_client = AsyncMock()
@@ -1419,9 +1505,9 @@ async def test_update_article_version_handling():
     mock_client.update_article.return_value = {"id": "a-1", "version": 6}
     ctx = FakeContext(mock_client)
 
-    await update_article(ctx, article_id="a-1", version=6)
+    await update_article(ctx, article_id="a-1")
     update_data = mock_client.update_article.call_args[0][1]
-    assert update_data["version"] == 6
+    assert update_data["version"] == 5
 
 
 async def test_update_article_unit_name():
@@ -1432,7 +1518,7 @@ async def test_update_article_unit_name():
     mock_client.update_article.return_value = {"id": "a-1", "version": 1}
     ctx = FakeContext(mock_client)
 
-    await update_article(ctx, article_id="a-1", version=1, unit_name="Stunde")
+    await update_article(ctx, article_id="a-1", unit_name="Stunde")
     update_data = mock_client.update_article.call_args[0][1]
     assert update_data["unitName"] == "Stunde"
 
@@ -1445,7 +1531,7 @@ async def test_update_article_description():
     mock_client.update_article.return_value = {"id": "a-1", "version": 1}
     ctx = FakeContext(mock_client)
 
-    await update_article(ctx, article_id="a-1", version=1, description="New desc")
+    await update_article(ctx, article_id="a-1", description="New desc")
     update_data = mock_client.update_article.call_args[0][1]
     assert update_data["description"] == "New desc"
 
@@ -1671,7 +1757,7 @@ async def test_create_draft_invoice_net_tax():
     result = await create_draft_invoice(
         ctx,
         recipient_name="Net GmbH",
-        line_items='[{"name": "Consulting", "unit_price": 150}]',
+        line_items=[{"name": "Consulting", "unit_price": 150}],
     )
     call_data = ctx.lifespan_context["lexoffice"].create_invoice.call_args[0][0]
     assert call_data["taxConditions"]["taxType"] == "net"
@@ -1686,7 +1772,7 @@ async def test_create_draft_invoice_tax_rate_override():
     result = await create_draft_invoice(
         ctx,
         recipient_name="Books GmbH",
-        line_items='[{"name": "Books", "unit_price": 50}]',
+        line_items=[{"name": "Books", "unit_price": 50}],
         tax_rate=7,
     )
     call_data = ctx.lifespan_context["lexoffice"].create_invoice.call_args[0][0]
@@ -1702,7 +1788,7 @@ async def test_create_draft_invoice_gross_tax():
     result = await create_draft_invoice(
         ctx,
         recipient_name="Gross GmbH",
-        line_items='[{"name": "Service", "unit_price": 200}]',
+        line_items=[{"name": "Service", "unit_price": 200}],
     )
     call_data = ctx.lifespan_context["lexoffice"].create_invoice.call_args[0][0]
     assert call_data["taxConditions"]["taxType"] == "gross"
@@ -1717,7 +1803,7 @@ async def test_create_draft_quotation_net_tax():
     result = await create_draft_quotation(
         ctx,
         recipient_name="Net GmbH",
-        line_items='[{"name": "Consulting", "unit_price": 150}]',
+        line_items=[{"name": "Consulting", "unit_price": 150}],
     )
     call_data = ctx.lifespan_context["lexoffice"].create_quotation.call_args[0][0]
     assert call_data["taxConditions"]["taxType"] == "net"

@@ -29,14 +29,15 @@ LEXOFFICE_API_KEY='op://Vault/item-id/API key' python -m mcp_lexoffice.server
 - Per-item `tax_rate` override available on invoices, quotations, and articles
 - Default payment terms: "Zahlbar sofort, rein netto"
 
-## Tools (27 total)
-- **Invoices**: create_draft_invoice, finalize_invoice, send_invoice, get_invoice, get_invoice_pdf, list_invoices
+## Tools (36 total)
+- **Invoices**: create_draft_invoice, create_and_send_invoice, finalize_invoice, send_invoice, get_invoice, get_invoice_pdf, list_invoices, delete_draft_invoice
 - **Financial**: list_expenses, get_financial_overview, get_payment_status
-- **Contacts**: search_contacts, get_contact, create_contact, update_contact
-- **Quotations**: create_draft_quotation, finalize_quotation, pursue_quotation_to_invoice
+- **Contacts**: search_contacts, get_contact, create_contact, update_contact, find_or_create_contact, get_contact_invoices
+- **Quotations**: create_draft_quotation, finalize_quotation, pursue_quotation_to_invoice, convert_quotation_and_send, list_quotations
+- **Credit Notes**: create_credit_note
 - **Dunnings**: create_dunning, render_dunning_pdf
 - **Articles**: list_articles, create_article, get_article, update_article
-- **Other**: upload_voucher, get_profile, list_vouchers, list_payment_conditions, list_countries
+- **Other**: upload_voucher, get_profile, list_vouchers, get_voucher, update_voucher, list_payment_conditions, list_countries
 
 ## API Notes
 - Rate limit: 2 requests/second (HTTP 429 on exceed, auto-retry with Retry-After)

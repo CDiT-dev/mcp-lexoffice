@@ -6,7 +6,7 @@ import logging
 import os
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timezone
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastmcp import FastMCP, Context
 from mcp.types import Icon
@@ -149,9 +149,10 @@ async def create_draft_invoice(
     ctx: Context,
     recipient_name: Annotated[str, "Company or person name for the invoice recipient"],
     line_items: Annotated[
-        str,
-        "JSON array of line items. Each: {name, unit_price, quantity?, unit_name?, description?, tax_rate?}",
+        list[dict[str, Any]],
+        "Line items. Each: {name, unit_price, quantity?, unit_name?, description?, tax_rate?}",
     ],
+    contact_id: Annotated[str | None, "UUID of an existing Lexoffice contact (links invoice to contact record)"] = None,
     street: Annotated[str | None, "Recipient street address"] = None,
     zip_code: Annotated[str | None, "Recipient postal code"] = None,
     city: Annotated[str | None, "Recipient city"] = None,
@@ -165,16 +166,17 @@ async def create_draft_invoice(
 ) -> str:
     """[finance] Create a draft invoice in Lexware Office. Returns the invoice ID and a deep link to review it.
 
+    Use create_and_send_invoice instead if you want to create, finalize, and send in one step.
     Line items example: [{"name": "IT Consulting", "unit_price": 3000, "quantity": 1}]
     Tax regime is auto-detected from the Lexoffice profile. Override per-item via tax_rate field.
     """
-    items = json.loads(line_items)
     tax_config = await _get_tax_config(ctx)
     effective_rate = tax_rate if tax_rate is not None else tax_config["default_rate"]
+    address = {"contactId": contact_id} if contact_id else _build_address(recipient_name, street, zip_code, city, country_code)
     data: dict[str, Any] = {
         "voucherDate": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000+00:00"),
-        "address": _build_address(recipient_name, street, zip_code, city, country_code),
-        "lineItems": _build_line_items(items, default_tax_rate=effective_rate),
+        "address": address,
+        "lineItems": _build_line_items(line_items, default_tax_rate=effective_rate),
         "totalPrice": {"currency": currency},
         "taxConditions": {"taxType": tax_config["tax_type"]},
         "shippingConditions": {"shippingType": "none"},
@@ -203,7 +205,8 @@ async def finalize_invoice(
 ) -> str:
     """[finance] Finalize a draft invoice — assigns an invoice number and makes it non-editable.
     Review the draft in Lexoffice UI before calling this. Cannot be undone."""
-    result = await _client(ctx).finalize_invoice(invoice_id)
+    await _client(ctx).finalize_invoice(invoice_id)
+    result = await _client(ctx).get_invoice(invoice_id)
     result["deepLink"] = _deep_link(invoice_id)
     return _fmt(result)
 
@@ -242,12 +245,21 @@ async def send_invoice(
 @mcp.tool
 async def get_invoice(
     ctx: Context,
-    invoice_id: Annotated[str, "UUID of the invoice"],
+    invoice_id: Annotated[str, "UUID of the invoice or voucher (IDs from list_invoices work here)"],
 ) -> str:
-    """[finance] Get full details for a specific invoice, including a deep link to Lexoffice UI."""
-    result = await _client(ctx).get_invoice(invoice_id)
+    """[finance] Get full details for a specific invoice, including a deep link to Lexoffice UI.
+
+    Handles both Invoice API objects and bookkeeping vouchers (Belege) —
+    tries /invoices/{id} first, falls back to /vouchers/{id} on 404."""
+    result = await _client(ctx).get_invoice_or_voucher(invoice_id)
+    resolved_via = result.pop("_resolvedVia", "invoices")
     is_draft = result.get("voucherStatus") == "draft"
     result["deepLink"] = _deep_link(invoice_id, edit=is_draft)
+    if resolved_via == "vouchers":
+        result["_note"] = (
+            "This is a bookkeeping voucher (Beleg), not an Invoice API object. "
+            "It was likely uploaded or imported, not created via the invoicing UI/API."
+        )
     return _fmt(result)
 
 
@@ -266,11 +278,16 @@ async def list_invoices(
     ctx: Context,
     status: Annotated[
         str | None,
-        "Filter: draft, open, paid, paidoff, voided, overdue (comma-separated for multiple)",
+        "Filter: draft, open, paid, paidoff, voided, overdue, unchecked "
+        "(comma-separated for multiple). 'unchecked' = uploaded Belege awaiting review.",
     ] = None,
     page: Annotated[int, "Page number (0-indexed)"] = 0,
 ) -> str:
-    """[finance] List sales invoices, optionally filtered by status. Returns voucher number, contact, amount, and deep links."""
+    """[finance] List sales invoices, optionally filtered by status. Returns voucher number, contact, amount, and deep links.
+
+    Note: This queries the voucherlist API which returns both Invoice API objects
+    (created via UI/API) and bookkeeping vouchers (Belege). Items with status
+    'unchecked' are uploaded documents, not proper invoices."""
     result = await _client(ctx).filter_vouchers(
         "salesinvoice", voucher_status=status, page=page
     )
@@ -278,6 +295,8 @@ async def list_invoices(
     for item in result.get("content", []):
         vid = item.get("voucherId", "")
         item["deepLink"] = _deep_link(vid)
+        if item.get("voucherStatus") == "unchecked":
+            item["_note"] = "Bookkeeping voucher (Beleg), not an Invoice API object"
         due = item.get("dueDate")
         if due and item.get("voucherStatus") == "open":
             try:
@@ -319,15 +338,12 @@ async def upload_voucher(
 @mcp.tool
 async def list_expenses(
     ctx: Context,
-    status: Annotated[str | None, "Filter: open, paid, paidoff, voided, overdue (comma-separated). Default: open,paid,paidoff,overdue"] = None,
+    status: Annotated[str | None, "Filter: draft, open, paid, paidoff, voided, overdue, unchecked (comma-separated)"] = None,
     page: Annotated[int, "Page number (0-indexed)"] = 0,
 ) -> str:
-    """[finance] List purchase invoices and expenses.
-
-    Returns purchase invoices and expenses. For filtering by voucher type, use list_vouchers instead."""
-    effective_status = status if status is not None else "open,paid,paidoff,overdue"
+    """[finance] List purchase invoices and expenses."""
     result = await _client(ctx).filter_vouchers(
-        "purchaseinvoice", voucher_status=effective_status, page=page
+        "purchaseinvoice", voucher_status=status, page=page
     )
     for item in result.get("content", []):
         vid = item.get("voucherId", "")
@@ -338,11 +354,12 @@ async def list_expenses(
 @mcp.tool
 async def get_financial_overview(
     ctx: Context,
-    months: Annotated[int, "Number of months to include (default 6)"] = 6,
+    months: Annotated[int, "Number of months to include (1-12, default 6)"] = 6,
 ) -> str:
     """[finance] Get a monthly revenue/expense/net overview. Queries sales and purchase invoices.
 
     months defaults to 6, maximum 12. Large ranges may be slow as it queries all settled invoices."""
+    months = max(1, min(12, months))
     sales = await _client(ctx).filter_vouchers("salesinvoice", voucher_status="paidoff", size=250)
     purchases = await _client(ctx).filter_vouchers("purchaseinvoice", voucher_status="paidoff", size=250)
     open_invoices = await _client(ctx).filter_vouchers("salesinvoice", voucher_status="open", size=250)
@@ -469,7 +486,7 @@ async def create_contact(
     company_name: Annotated[str | None, "Company name (use this OR person fields)"] = None,
     first_name: Annotated[str | None, "Person first name"] = None,
     last_name: Annotated[str | None, "Person last name"] = None,
-    role: Annotated[str, "Contact role: customer or vendor"] = "customer",
+    role: Annotated[Literal["customer", "vendor"], "Contact role"] = "customer",
     email: Annotated[str | None, "Email address"] = None,
     street: Annotated[str | None, "Street address"] = None,
     zip_code: Annotated[str | None, "Postal code"] = None,
@@ -515,17 +532,13 @@ async def create_contact(
 async def update_contact(
     ctx: Context,
     contact_id: Annotated[str, "UUID of the contact"],
-    version: Annotated[int, "Current version number (for optimistic locking)"],
     company_name: Annotated[str | None, "Updated company name"] = None,
     first_name: Annotated[str | None, "Updated person first name"] = None,
     last_name: Annotated[str | None, "Updated person last name"] = None,
     email: Annotated[str | None, "Updated email address"] = None,
 ) -> str:
-    """[finance] Update an existing contact. Get the current version from get_contact first.
-
-    Note: The Lexoffice API uses optimistic locking. Call get_contact first to obtain the current `version` field, then pass it here."""
+    """[finance] Update an existing contact. Fetches current state and applies changes atomically."""
     existing = await _client(ctx).get_contact(contact_id)
-    existing["version"] = version
 
     if company_name and "company" in existing:
         existing["company"]["name"] = company_name
@@ -548,7 +561,11 @@ async def update_contact(
 async def create_draft_quotation(
     ctx: Context,
     recipient_name: Annotated[str, "Company or person name"],
-    line_items: Annotated[str, "JSON array of line items: [{name, unit_price, quantity?, unit_name?, description?, tax_rate?}]"],
+    line_items: Annotated[
+        list[dict[str, Any]],
+        "Line items. Each: {name, unit_price, quantity?, unit_name?, description?, tax_rate?}",
+    ],
+    contact_id: Annotated[str | None, "UUID of an existing Lexoffice contact (links quotation to contact record)"] = None,
     street: Annotated[str | None, "Recipient street address"] = None,
     zip_code: Annotated[str | None, "Recipient postal code"] = None,
     city: Annotated[str | None, "Recipient city"] = None,
@@ -561,13 +578,13 @@ async def create_draft_quotation(
     tax_rate: Annotated[int | None, "Override tax rate percentage for all line items"] = None,
 ) -> str:
     """[finance] Create a draft quotation (Angebot) in Lexware Office. Returns ID and deep link."""
-    items = json.loads(line_items)
     tax_config = await _get_tax_config(ctx)
     effective_rate = tax_rate if tax_rate is not None else tax_config["default_rate"]
+    address = {"contactId": contact_id} if contact_id else _build_address(recipient_name, street, zip_code, city, country_code)
     data: dict[str, Any] = {
         "voucherDate": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000+00:00"),
-        "address": _build_address(recipient_name, street, zip_code, city, country_code),
-        "lineItems": _build_line_items(items, default_tax_rate=effective_rate),
+        "address": address,
+        "lineItems": _build_line_items(line_items, default_tax_rate=effective_rate),
         "totalPrice": {"currency": currency},
         "taxConditions": {"taxType": tax_config["tax_type"]},
         "shippingConditions": {"shippingType": "none"},
@@ -592,7 +609,8 @@ async def finalize_quotation(
     quotation_id: Annotated[str, "UUID of the draft quotation"],
 ) -> str:
     """[finance] Finalize a quotation — assigns Angebotsnummer, makes it sendable."""
-    result = await _client(ctx).finalize_quotation(quotation_id)
+    await _client(ctx).finalize_quotation(quotation_id)
+    result = await _client(ctx).get_quotation(quotation_id)
     result["deepLink"] = _deep_link(quotation_id)
     return _fmt(result)
 
@@ -648,9 +666,13 @@ async def render_dunning_pdf(
 
 
 @mcp.tool
-async def list_articles(ctx: Context) -> str:
+async def list_articles(
+    ctx: Context,
+    page: Annotated[int, "Page number (0-indexed)"] = 0,
+    size: Annotated[int, "Results per page (max 250)"] = 25,
+) -> str:
     """[finance] List all configured service articles (reusable line items)."""
-    result = await _client(ctx).list_articles()
+    result = await _client(ctx).list_articles(page=page, size=size)
     return _fmt(result)
 
 
@@ -660,7 +682,7 @@ async def create_article(
     name: Annotated[str, "Article name (e.g. 'Digitale Sprechstunde')"],
     net_price: Annotated[float, "Net price in EUR"],
     unit_name: Annotated[str, "Unit: Stunde, Tag, Pauschal, Stück"] = "Stück",
-    article_type: Annotated[str, "Type: SERVICE or PRODUCT"] = "SERVICE",
+    article_type: Annotated[Literal["SERVICE", "PRODUCT"], "Article type"] = "SERVICE",
     description: Annotated[str | None, "Article description"] = None,
     tax_rate: Annotated[int | None, "Override tax rate percentage"] = None,
 ) -> str:
@@ -697,17 +719,13 @@ async def get_article(
 async def update_article(
     ctx: Context,
     article_id: Annotated[str, "UUID of the article"],
-    version: Annotated[int, "Current version number (for optimistic locking)"],
     name: Annotated[str | None, "Updated article name"] = None,
     net_price: Annotated[float | None, "Updated net price"] = None,
     unit_name: Annotated[str | None, "Updated unit name"] = None,
     description: Annotated[str | None, "Updated description"] = None,
 ) -> str:
-    """[finance] Update an existing article. Get the current version from get_article first.
-
-    Call get_article first to obtain the current `version` field."""
+    """[finance] Update an existing article. Fetches current state and applies changes atomically."""
     existing = await _client(ctx).get_article(article_id)
-    existing["version"] = version
     if name:
         existing["title"] = name
     if net_price is not None:
@@ -727,16 +745,20 @@ async def update_article(
 async def list_vouchers(
     ctx: Context,
     voucher_type: Annotated[
-        str,
-        "Type: salesinvoice, creditnote, orderconfirmation, quotation, deliverynote, "
-        "downpaymentinvoice, purchaseinvoice, purchasecreditnote",
+        Literal[
+            "creditnote", "orderconfirmation", "quotation", "deliverynote",
+            "downpaymentinvoice", "purchasecreditnote",
+            "salesinvoice", "purchaseinvoice",
+        ],
+        "Voucher type to list",
     ],
     status: Annotated[str | None, "Filter: draft, open, paid, paidoff, voided, overdue (comma-separated)"] = None,
     page: Annotated[int, "Page number (0-indexed)"] = 0,
 ) -> str:
     """[finance] List vouchers of a given type with optional status filter.
 
-    For a simpler view of purchase invoices without type filtering, use list_expenses."""
+    Prefer dedicated tools: list_invoices for salesinvoice, list_expenses for purchaseinvoice,
+    list_quotations for quotation. Use this for other types (creditnote, orderconfirmation, etc.)."""
     result = await _client(ctx).filter_vouchers(
         voucher_type, voucher_status=status, page=page
     )
@@ -795,6 +817,255 @@ async def list_payment_conditions(ctx: Context) -> str:
 async def list_countries(ctx: Context) -> str:
     """[finance] List all countries with their tax classification (DE, intraCommunity, thirdPartyCountry)."""
     result = await _client(ctx).list_countries()
+    return _fmt(result)
+
+
+# ── Capability Tools (composite workflows) ─────────────────────────
+
+
+@mcp.tool
+async def create_and_send_invoice(
+    ctx: Context,
+    recipient_name: Annotated[str, "Company or person name for the invoice recipient"],
+    recipient_email: Annotated[str, "Email address to send the invoice to"],
+    line_items: Annotated[
+        list[dict[str, Any]],
+        "Line items. Each: {name, unit_price, quantity?, unit_name?, description?, tax_rate?}",
+    ],
+    contact_id: Annotated[str | None, "UUID of an existing Lexoffice contact (links invoice to contact record)"] = None,
+    street: Annotated[str | None, "Recipient street address"] = None,
+    zip_code: Annotated[str | None, "Recipient postal code"] = None,
+    city: Annotated[str | None, "Recipient city"] = None,
+    country_code: Annotated[str, "ISO country code"] = "DE",
+    currency: Annotated[str, "Currency code"] = "EUR",
+    payment_term_duration: Annotated[int | None, "Payment term in days (e.g. 14)"] = None,
+    title: Annotated[str, "Invoice title"] = "Rechnung",
+    introduction: Annotated[str | None, "Introduction text above line items"] = None,
+    remark: Annotated[str | None, "Closing remark below line items"] = None,
+    tax_rate: Annotated[int | None, "Override tax rate percentage for all line items"] = None,
+) -> str:
+    """[finance] Create, finalize, and send an invoice in one step.
+
+    Use when the user says 'send an invoice to X for Y'. Creates a draft, finalizes it
+    (assigns invoice number), and emails it to the recipient. For drafts that need
+    review first, use create_draft_invoice instead."""
+    tax_config = await _get_tax_config(ctx)
+    effective_rate = tax_rate if tax_rate is not None else tax_config["default_rate"]
+    address = {"contactId": contact_id} if contact_id else _build_address(recipient_name, street, zip_code, city, country_code)
+    data: dict[str, Any] = {
+        "voucherDate": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000+00:00"),
+        "address": address,
+        "lineItems": _build_line_items(line_items, default_tax_rate=effective_rate),
+        "totalPrice": {"currency": currency},
+        "taxConditions": {"taxType": tax_config["tax_type"]},
+        "shippingConditions": {"shippingType": "none"},
+        "title": title,
+    }
+    if introduction:
+        data["introduction"] = introduction
+    if remark:
+        data["remark"] = remark
+    if payment_term_duration:
+        data["paymentConditions"] = {
+            "paymentTermLabel": f"{payment_term_duration} Tage",
+            "paymentTermDuration": payment_term_duration,
+        }
+
+    created = await _client(ctx).create_invoice(data)
+    invoice_id = created.get("id", "")
+    await _client(ctx).finalize_invoice(invoice_id)
+    await _client(ctx).send_invoice(invoice_id, recipient_email)
+    invoice = await _client(ctx).get_invoice(invoice_id)
+    invoice["deepLink"] = _deep_link(invoice_id)
+    return _fmt({
+        "status": "sent",
+        "invoice_id": invoice_id,
+        "voucherNumber": invoice.get("voucherNumber"),
+        "recipient": recipient_email,
+        "totalAmount": invoice.get("totalPrice", {}).get("totalNetAmount"),
+        "deepLink": invoice["deepLink"],
+    })
+
+
+@mcp.tool
+async def find_or_create_contact(
+    ctx: Context,
+    name: Annotated[str, "Company or person name to search for"],
+    role: Annotated[Literal["customer", "vendor"], "Contact role"] = "customer",
+    email: Annotated[str | None, "Email address (used for creation if contact not found)"] = None,
+    first_name: Annotated[str | None, "Person first name (if not a company)"] = None,
+    last_name: Annotated[str | None, "Person last name (if not a company)"] = None,
+) -> str:
+    """[finance] Find a contact by name or create one if it doesn't exist. Returns the contact ID.
+
+    Searches by name first. If exactly one match is found, returns it.
+    If no match, creates a new contact. If multiple matches, returns them all for disambiguation."""
+    results = await _client(ctx).filter_contacts(name=name)
+    matches = results.get("content", [])
+
+    if len(matches) == 1:
+        contact = matches[0]
+        contact["deepLink"] = _contact_link(contact.get("id", ""))
+        contact["_action"] = "found_existing"
+        return _fmt(contact)
+
+    if len(matches) > 1:
+        for c in matches:
+            c["deepLink"] = _contact_link(c.get("id", ""))
+        return _fmt({"_action": "multiple_matches", "message": f"Found {len(matches)} contacts matching '{name}'. Pick one or refine the search.", "contacts": matches})
+
+    data: dict[str, Any] = {"version": 0, "roles": {role: {}}}
+    if first_name or last_name:
+        person: dict[str, str] = {}
+        if first_name:
+            person["firstName"] = first_name
+        if last_name:
+            person["lastName"] = last_name
+        data["person"] = person
+    else:
+        data["company"] = {"name": name}
+    if email:
+        data["emailAddresses"] = {"business": [email]}
+
+    result = await _client(ctx).create_contact(data)
+    contact_id = result.get("id", "")
+    result["deepLink"] = _contact_link(contact_id)
+    result["_action"] = "created_new"
+    return _fmt(result)
+
+
+@mcp.tool
+async def convert_quotation_and_send(
+    ctx: Context,
+    quotation_id: Annotated[str, "UUID of the finalized quotation"],
+    recipient_email: Annotated[str, "Email address to send the invoice to"],
+) -> str:
+    """[finance] Convert an accepted quotation into an invoice and send it in one step.
+
+    The quotation must be finalized first. Creates a draft invoice from the quotation,
+    finalizes it, and sends it by email."""
+    quotation = await _client(ctx).get_quotation(quotation_id)
+    status = quotation.get("voucherStatus", "")
+    if status == "draft":
+        return _fmt({"error": "Quotation is still a draft. Finalize it first.", "deepLink": _deep_link(quotation_id, edit=True)})
+
+    pursued = await _client(ctx).pursue_quotation(quotation_id)
+    invoice_id = pursued.get("id", "")
+    await _client(ctx).finalize_invoice(invoice_id)
+    await _client(ctx).send_invoice(invoice_id, recipient_email)
+    invoice = await _client(ctx).get_invoice(invoice_id)
+    invoice["deepLink"] = _deep_link(invoice_id)
+    return _fmt({
+        "status": "sent",
+        "invoice_id": invoice_id,
+        "voucherNumber": invoice.get("voucherNumber"),
+        "recipient": recipient_email,
+        "quotation_id": quotation_id,
+        "deepLink": invoice["deepLink"],
+    })
+
+
+@mcp.tool
+async def list_quotations(
+    ctx: Context,
+    status: Annotated[str | None, "Filter: draft, open, accepted, rejected, voided (comma-separated)"] = None,
+    page: Annotated[int, "Page number (0-indexed)"] = 0,
+) -> str:
+    """[finance] List quotations (Angebote), optionally filtered by status."""
+    result = await _client(ctx).filter_vouchers(
+        "quotation", voucher_status=status, page=page
+    )
+    for item in result.get("content", []):
+        vid = item.get("voucherId", "")
+        item["deepLink"] = _deep_link(vid)
+    return _fmt(result)
+
+
+@mcp.tool
+async def get_contact_invoices(
+    ctx: Context,
+    contact_name: Annotated[str | None, "Contact name to search for"] = None,
+    contact_id: Annotated[str | None, "UUID of the contact (preferred over name)"] = None,
+    status: Annotated[str | None, "Filter: draft, open, paid, paidoff, voided, overdue (comma-separated)"] = None,
+) -> str:
+    """[finance] List all invoices for a specific contact. Search by name or provide a contact ID directly.
+
+    Use when the user asks 'show all invoices for Acme GmbH' or 'what did we bill StoryKeep?'."""
+    if not contact_id and not contact_name:
+        return _fmt({"error": "Provide either contact_id or contact_name"})
+
+    if not contact_id:
+        contacts = await _client(ctx).filter_contacts(name=contact_name)
+        matches = contacts.get("content", [])
+        if not matches:
+            return _fmt({"error": f"No contact found matching '{contact_name}'"})
+        if len(matches) > 1:
+            return _fmt({
+                "error": f"Multiple contacts match '{contact_name}'. Provide a contact_id.",
+                "contacts": [{"id": c.get("id"), "name": c.get("company", {}).get("name") or f"{c.get('person', {}).get('firstName', '')} {c.get('person', {}).get('lastName', '')}".strip()} for c in matches],
+            })
+        contact_id = matches[0].get("id", "")
+
+    result = await _client(ctx).filter_vouchers(
+        "salesinvoice", voucher_status=status, contact_id=contact_id
+    )
+    today = date.today()
+    for item in result.get("content", []):
+        vid = item.get("voucherId", "")
+        item["deepLink"] = _deep_link(vid)
+        due = item.get("dueDate")
+        if due and item.get("voucherStatus") == "open":
+            try:
+                due_date = date.fromisoformat(due[:10])
+                if due_date < today:
+                    item["daysOverdue"] = (today - due_date).days
+            except (ValueError, TypeError):
+                pass
+    return _fmt(result)
+
+
+@mcp.tool
+async def create_credit_note(
+    ctx: Context,
+    recipient_name: Annotated[str, "Company or person name"],
+    line_items: Annotated[
+        list[dict[str, Any]],
+        "Line items. Each: {name, unit_price, quantity?, unit_name?, description?, tax_rate?}",
+    ],
+    preceding_invoice_id: Annotated[str | None, "UUID of the original invoice this corrects"] = None,
+    contact_id: Annotated[str | None, "UUID of an existing Lexoffice contact"] = None,
+    street: Annotated[str | None, "Recipient street address"] = None,
+    zip_code: Annotated[str | None, "Recipient postal code"] = None,
+    city: Annotated[str | None, "Recipient city"] = None,
+    country_code: Annotated[str, "ISO country code"] = "DE",
+    title: Annotated[str, "Credit note title"] = "Gutschrift",
+    introduction: Annotated[str | None, "Introduction text"] = None,
+    remark: Annotated[str | None, "Closing remark"] = None,
+    finalize: Annotated[bool, "Finalize immediately (assigns number, cannot be undone)"] = False,
+) -> str:
+    """[finance] Create a credit note (Gutschrift) for a correction or refund.
+
+    Optionally link to the original invoice via preceding_invoice_id."""
+    tax_config = await _get_tax_config(ctx)
+    address = {"contactId": contact_id} if contact_id else _build_address(recipient_name, street, zip_code, city, country_code)
+    data: dict[str, Any] = {
+        "voucherDate": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000+00:00"),
+        "address": address,
+        "lineItems": _build_line_items(line_items, default_tax_rate=tax_config["default_rate"]),
+        "totalPrice": {"currency": "EUR"},
+        "taxConditions": {"taxType": tax_config["tax_type"]},
+        "title": title,
+    }
+    if introduction:
+        data["introduction"] = introduction
+    if remark:
+        data["remark"] = remark
+
+    result = await _client(ctx).create_credit_note(
+        data, finalize=finalize, preceding_id=preceding_invoice_id
+    )
+    cn_id = result.get("id", "")
+    result["deepLink"] = _deep_link(cn_id, edit=not finalize)
     return _fmt(result)
 
 

@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.3.2] - 2026-05-25
+
+- fix(CDI-1160): query both salesinvoice and invoice voucherTypes
+
+
 ## [0.3.1] - 2026-05-25
 
 - feat: v0.3.0 — capability tools, LLM ergonomics overhaul

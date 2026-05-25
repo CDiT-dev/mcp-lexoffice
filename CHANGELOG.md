@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.3.1] - 2026-05-25
+
+- feat: v0.3.0 — capability tools, LLM ergonomics overhaul
+
+
 ## [0.2.8] - 2026-04-20
 
 - ci(deps): enable Dependabot weekly updates

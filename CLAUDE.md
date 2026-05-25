@@ -29,11 +29,12 @@ LEXOFFICE_API_KEY='op://Vault/item-id/API key' python -m mcp_lexoffice.server
 - Per-item `tax_rate` override available on invoices, quotations, and articles
 - Default payment terms: "Zahlbar sofort, rein netto"
 
-## Tools (36 total)
+## Tools (38 total)
 - **Invoices**: create_draft_invoice, create_and_send_invoice, finalize_invoice, send_invoice, get_invoice, get_invoice_pdf, list_invoices, delete_draft_invoice
 - **Financial**: list_expenses, get_financial_overview, get_payment_status
 - **Contacts**: search_contacts, get_contact, create_contact, update_contact, find_or_create_contact, get_contact_invoices
 - **Quotations**: create_draft_quotation, finalize_quotation, pursue_quotation_to_invoice, convert_quotation_and_send, list_quotations
+- **Recurring**: list_recurring_templates, get_recurring_template
 - **Credit Notes**: create_credit_note
 - **Dunnings**: create_dunning, render_dunning_pdf
 - **Articles**: list_articles, create_article, get_article, update_article

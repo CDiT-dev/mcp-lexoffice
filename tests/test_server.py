@@ -207,13 +207,14 @@ async def test_all_tools_registered():
         "create_and_send_invoice", "find_or_create_contact",
         "convert_quotation_and_send", "list_quotations",
         "get_contact_invoices", "create_credit_note",
+        "list_recurring_templates", "get_recurring_template",
     }
     assert expected == names
 
 
 async def test_tool_count():
     tools = await mcp.list_tools()
-    assert len(tools) == 36
+    assert len(tools) == 38
 
 
 # ── Profile tool ─────────────────────────────────────────────────────

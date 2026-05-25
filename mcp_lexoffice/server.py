@@ -820,6 +820,34 @@ async def list_countries(ctx: Context) -> str:
     return _fmt(result)
 
 
+# ── Recurring Templates ────────────────────────────────────────────
+
+
+@mcp.tool
+async def list_recurring_templates(ctx: Context) -> str:
+    """[finance] List all recurring invoice templates (Abo-Rechnungen).
+
+    Shows scheduled invoices that are automatically created on a recurring basis.
+    Each template contains the line items, recipient, schedule, and next execution date."""
+    result = await _client(ctx).list_recurring_templates()
+    if isinstance(result, list):
+        for item in result:
+            tid = item.get("id", "")
+            item["deepLink"] = f"{LEXOFFICE_UI}/#/permalink/recurring-templates/view/{tid}"
+    return _fmt(result)
+
+
+@mcp.tool
+async def get_recurring_template(
+    ctx: Context,
+    template_id: Annotated[str, "UUID of the recurring template"],
+) -> str:
+    """[finance] Get full details for a recurring invoice template, including schedule, line items, and next execution date."""
+    result = await _client(ctx).get_recurring_template(template_id)
+    result["deepLink"] = f"{LEXOFFICE_UI}/#/permalink/recurring-templates/view/{template_id}"
+    return _fmt(result)
+
+
 # ── Capability Tools (composite workflows) ─────────────────────────
 
 

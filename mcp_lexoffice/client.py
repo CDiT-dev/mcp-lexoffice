@@ -302,6 +302,16 @@ class LexofficeClient:
         resp = await self._request("PUT", f"/vouchers/{voucher_id}", json=data)
         return resp.json()
 
+    # ── Recurring Templates ────────────────────────────────────────
+
+    async def list_recurring_templates(self) -> list[dict]:
+        resp = await self._request("GET", "/recurring-templates")
+        return resp.json()
+
+    async def get_recurring_template(self, template_id: str) -> dict:
+        resp = await self._request("GET", f"/recurring-templates/{template_id}")
+        return resp.json()
+
     # ── Payments ─────────────────────────────────────────────────────
 
     async def get_payments(self, invoice_id: str) -> dict:

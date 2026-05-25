@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.3.3] - 2026-05-25
+
+- feat: add recurring template tools + invoice voucherType fix
+
+
 ## [0.3.2] - 2026-05-25
 
 - fix(CDI-1160): query both salesinvoice and invoice voucherTypes

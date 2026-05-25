@@ -1,6 +1,6 @@
 [project]
 name = "mcp-lexoffice"
-version = "0.3.2"
+version = "0.3.3"
 description = "MCP server for Lexware Office (formerly Lexoffice) — invoices, contacts, and accounting"
 requires-python = ">=3.11"
 dependencies = [

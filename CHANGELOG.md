@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.3.6] - 2026-05-29
+
+- fix: derive __version__ from package metadata to stop health version drift
+
+
 ## [0.3.5] - 2026-05-29
 
 - feat(CDI-1164): add structured purchase voucher creation for Belegfänger enrichment

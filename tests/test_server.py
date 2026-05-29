@@ -925,7 +925,7 @@ async def test_create_voucher_collective_contact_when_no_id():
 
 
 async def test_create_voucher_resolves_default_category():
-    """No category_id → resolve a contact-optional outgo category and cache it."""
+    """No category_id → resolve a default outgo category and cache it (per has_contact)."""
     from mcp_lexoffice.server import create_voucher
 
     client = AsyncMock()
@@ -941,8 +941,49 @@ async def test_create_voucher_resolves_default_category():
     await create_voucher(ctx, total_amount=119.0, voucher_date="2026-05-29", contact_id="vendor-1")
     sent = client.create_voucher.call_args[0][0]
     assert sent["voucherItems"][0]["categoryId"] == "out-sonstige"
-    # cached on lifespan context
-    assert ctx.lifespan_context["default_purchase_category_id"] == "out-sonstige"
+    # cached on lifespan context, keyed by has_contact
+    assert ctx.lifespan_context["default_purchase_category_id:True"] == "out-sonstige"
+
+
+async def test_create_voucher_default_prefers_lizenzen_und_konzessionen():
+    """SaaS receipts should land on 'Lizenzen und Konzessionen' — preferred over the generic
+    catch-all, and chosen even though it requires a contact (we attach one)."""
+    from mcp_lexoffice.server import create_voucher
+
+    client = AsyncMock()
+    client.list_posting_categories.return_value = [
+        # The tax-restricted contact-optional catch-all the OLD resolver wrongly picked:
+        {"id": "out-catchall", "name": "Sonstige Kosten", "type": "outgo", "contactRequired": False},
+        # The right account — but flagged contactRequired:
+        {"id": "out-lizenz", "name": "Lizenzen und Konzessionen", "type": "outgo", "contactRequired": True},
+    ]
+    client.create_voucher.return_value = {"id": "v-lz"}
+    client.get_voucher.return_value = _created_voucher(id="v-lz")
+    ctx = FakeContext(client)
+
+    await create_voucher(ctx, total_amount=8.17, voucher_date="2026-06-05", contact_id="vendor-1", tax_rate=19)
+    sent = client.create_voucher.call_args[0][0]
+    assert sent["voucherItems"][0]["categoryId"] == "out-lizenz"
+    assert sent["voucherItems"][0]["taxRatePercent"] == 19  # accepted, no fallback
+
+
+async def test_create_voucher_default_skips_contact_required_without_contact():
+    """With no real contact (collective), contactRequired accounts are not eligible."""
+    from mcp_lexoffice.server import create_voucher
+
+    client = AsyncMock()
+    client.list_posting_categories.return_value = [
+        {"id": "out-lizenz", "name": "Lizenzen und Konzessionen", "type": "outgo", "contactRequired": True},
+        {"id": "out-sonstige", "name": "Sonstige Kosten", "type": "outgo", "contactRequired": False},
+    ]
+    client.create_voucher.return_value = {"id": "v-cc"}
+    client.get_voucher.return_value = _created_voucher(id="v-cc", contactId=None, useCollectiveContact=True)
+    ctx = FakeContext(client)
+
+    await create_voucher(ctx, total_amount=8.17, voucher_date="2026-06-05", contact_name="Acme")
+    sent = client.create_voucher.call_args[0][0]
+    assert sent["voucherItems"][0]["categoryId"] == "out-sonstige"
+    assert ctx.lifespan_context["default_purchase_category_id:False"] == "out-sonstige"
 
 
 async def test_create_voucher_attaches_file():

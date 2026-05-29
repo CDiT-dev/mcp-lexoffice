@@ -114,37 +114,62 @@ async def _get_tax_config(ctx: Context) -> dict:
     return config
 
 
-async def _default_purchase_category_id(ctx: Context) -> str:
-    """Resolve a sane default expense posting category (Buchungskonto) for purchase
-    vouchers, lazily cached on the lifespan context.
+# Software/SaaS subscriptions are the bulk of API-created purchase vouchers (e.g. Belegfänger
+# receipts), and book to "Lizenzen und Konzessionen" — an expense account that accepts standard
+# VAT (so the rate stays selectable in 'Zu prüfen' and input tax is reclaimable). Prefer it, then
+# fall back to other generic expense accounts. Tax-restricted catch-all accounts (which reject
+# 19% and grey out the tax dropdown) are deliberately not at the front of this list.
+_PURCHASE_CATEGORY_PREFERENCES = (
+    "lizenzen und konzessionen",
+    "lizenz",
+    "konzession",
+    "sonstige",
+    "betriebsbedarf",
+    "bürobedarf",
+    "buerobedarf",
+    "wareneingang",
+    "wareneinkauf",
+)
 
-    The Lexoffice docs only list travel categories for purchaseinvoice and recommend the
-    posting-categories endpoint for the full set. We pick a contact-optional 'outgo'
-    category, preferring a generic catch-all expense account; the user can re-book it in
-    'Zu prüfen'. Callers may always override with an explicit category_id."""
+
+async def _default_purchase_category_id(ctx: Context, *, has_contact: bool = True) -> str:
+    """Resolve a sane default expense posting category (Buchungskonto) for purchase vouchers,
+    lazily cached on the lifespan context (per has_contact).
+
+    Prefers 'Lizenzen und Konzessionen' (software/license expense) — the correct account for the
+    SaaS/subscription receipts that dominate API voucher creation, and one that accepts standard
+    VAT so the tax rate stays editable in review and Vorsteuer is reclaimable. When a contact is
+    attached, categories flagged contactRequired are eligible too — Lexoffice only needs the
+    contact, which we supply, so requiring contact-optional accounts would needlessly skip good
+    categories (this is why the old default landed on a tax-restricted catch-all). Callers may
+    always override with an explicit category_id."""
     lc = ctx.lifespan_context
-    if "default_purchase_category_id" in lc:
-        return lc["default_purchase_category_id"]
+    cache_key = f"default_purchase_category_id:{has_contact}"
+    if cache_key in lc:
+        return lc[cache_key]
     categories = await _client(ctx).list_posting_categories()
     outgo = [c for c in categories if c.get("type") == "outgo"]
-    preferred = ("sonstige", "betriebsbedarf", "bürobedarf", "buerobedarf", "wareneingang", "wareneinkauf")
+
+    def _eligible(c: dict) -> bool:
+        return has_contact or not c.get("contactRequired", False)
+
     chosen = None
-    for keyword in preferred:
+    for keyword in _PURCHASE_CATEGORY_PREFERENCES:
         for c in outgo:
             blob = f"{c.get('name', '')} {c.get('groupName', '')}".lower()
-            if keyword in blob and not c.get("contactRequired", False):
+            if keyword in blob and _eligible(c):
                 chosen = c
                 break
         if chosen:
             break
     if chosen is None:
-        chosen = next((c for c in outgo if not c.get("contactRequired", False)), None)
+        chosen = next((c for c in outgo if _eligible(c)), None)
     if chosen is None:
         chosen = outgo[0] if outgo else None
     if chosen is None:
         raise RuntimeError("No expense (outgo) posting categories available on this account")
     category_id = chosen["id"]
-    lc["default_purchase_category_id"] = category_id
+    lc[cache_key] = category_id
     return category_id
 
 
@@ -951,7 +976,7 @@ async def create_voucher(
                 "amount": item_amount,
                 "taxAmount": tax,
                 "taxRatePercent": rate,
-                "categoryId": category_id or await _default_purchase_category_id(ctx),
+                "categoryId": category_id or await _default_purchase_category_id(ctx, has_contact=bool(contact_id)),
             }
         ],
     }

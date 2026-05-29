@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.3.8] - 2026-05-29
+
+- fix(create_voucher): default purchase category to 'Lizenzen und Konzessionen'
+
+
 ## [0.3.7] - 2026-05-29
 
 - fix(create_voucher): fall back to 0% VAT when posting category rejects the rate

@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.3.5] - 2026-05-29
+
+- feat(CDI-1164): add structured purchase voucher creation for Belegfänger enrichment
+
+
 ## [0.3.4] - 2026-05-29
 
 - fix: upload files as multipart/form-data (Lexoffice /files 500)

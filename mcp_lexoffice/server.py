@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 from datetime import date, datetime, timezone
 from typing import Annotated, Any, Literal
 
+import httpx
 from fastmcp import FastMCP, Context
 from mcp.types import Icon
 
@@ -16,6 +17,26 @@ from .client import LexofficeClient
 logger = logging.getLogger(__name__)
 
 LEXOFFICE_UI = "https://app.lexoffice.de"
+
+
+def _is_taxrate_rejection(exc: httpx.HTTPStatusError) -> bool:
+    """True when Lexoffice rejected a voucher because the posting category does not
+    accept the supplied ``taxRatePercent`` (HTTP 406, IssueList source ``taxRatePercent``,
+    e.g. ``invalid_taxrate_19``).
+
+    Some Buchungskonten are tax-restricted (reverse-charge / intra-community / 0%-only),
+    so a generic default category may reject standard VAT rates. Detecting this lets
+    create_voucher fall back to a universally-accepted 0% booking instead of failing the
+    whole (often headless) run — the gross amount + vendor still persist for bank-matching,
+    and the user re-books the VAT in 'Zu prüfen'."""
+    resp = exc.response
+    if resp is None or resp.status_code != 406:
+        return False
+    try:
+        issues = resp.json().get("IssueList") or []
+    except Exception:
+        return False
+    return any(isinstance(i, dict) and i.get("source") == "taxRatePercent" for i in issues)
 
 
 def _deep_link(resource_id: str, *, edit: bool = False) -> str:
@@ -882,7 +903,12 @@ async def create_voucher(
     original receipt file and reads the voucher back to confirm enrichment stuck.
 
     Belegfänger flow: resolve the vendor (find_or_create_contact), then call this with the EUR
-    amount, voucher_date, contact_id, and the rendered PDF as file_content."""
+    amount, voucher_date, contact_id, and the rendered PDF as file_content.
+
+    If the resolved posting category rejects the given tax_rate (tax-restricted accounts —
+    e.g. reverse-charge foreign SaaS — return HTTP 406 invalid_taxrate), the voucher is
+    re-booked at 0% VAT so it still lands with the amount + vendor; the response sets
+    _enrichment.tax_rate_adjusted and a tax_note. Re-book the VAT during review."""
     if tax_type == "net" and voucher_status == "unchecked":
         return _fmt({
             "error": (
@@ -943,7 +969,27 @@ async def create_voucher(
     if contact_name:
         data["contactName"] = contact_name
 
-    created = await _client(ctx).create_voucher(data)
+    tax_rate_adjusted = False
+    try:
+        created = await _client(ctx).create_voucher(data)
+    except httpx.HTTPStatusError as exc:
+        # The resolved posting category rejected this VAT rate (tax-restricted account,
+        # e.g. reverse-charge foreign SaaS). Re-book at 0% — universally accepted — so the
+        # voucher still lands with the gross amount + vendor for bank-matching. The user
+        # corrects the VAT in 'Zu prüfen'.
+        if rate and _is_taxrate_rejection(exc):
+            rate = 0
+            item = data["voucherItems"][0]
+            item["taxAmount"] = 0.0
+            item["taxRatePercent"] = 0
+            data["totalTaxAmount"] = 0.0
+            # With no tax, gross == the booked line amount (matches Lexoffice's own
+            # 0%-reverse-charge vouchers, where totalGrossAmount == amount).
+            data["totalGrossAmount"] = item["amount"]
+            created = await _client(ctx).create_voucher(data)
+            tax_rate_adjusted = True
+        else:
+            raise
     voucher_id = created.get("id", "")
 
     attachment_error = None
@@ -979,6 +1025,12 @@ async def create_voucher(
             "file_attached": bool(persisted.get("files")),
         },
     }
+    if tax_rate_adjusted:
+        result["_enrichment"]["tax_rate_adjusted"] = True
+        result["tax_note"] = (
+            f"Posting category rejected {tax_rate}% VAT — booked at 0% so the voucher "
+            "could be created. Re-book the VAT in 'Zu prüfen' if input tax is reclaimable."
+        )
     if attachment_error:
         result["_enrichment"]["file_attached"] = False
         result["attachment_error"] = attachment_error

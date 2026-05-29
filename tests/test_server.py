@@ -8,6 +8,7 @@ import os
 from datetime import date, timedelta
 from unittest.mock import AsyncMock, patch
 
+import httpx
 import pytest
 
 from mcp_lexoffice.server import (
@@ -1005,6 +1006,100 @@ async def test_create_voucher_bad_attachment_type_reported():
     assert parsed["id"] == "v-7"
     assert "attachment_error" in parsed
     client.attach_voucher_file.assert_not_called()
+
+
+def _taxrate_406() -> httpx.HTTPStatusError:
+    """A live Lexoffice 406 rejecting taxRatePercent (the CDI-1164/1166 blocker)."""
+    request = httpx.Request("POST", "https://api.lexoffice.io/v1/vouchers")
+    response = httpx.Response(
+        406,
+        json={"IssueList": [{
+            "i18nKey": "invalid_taxrate_19",
+            "source": "taxRatePercent",
+            "type": "validation_failure",
+        }]},
+        request=request,
+    )
+    return httpx.HTTPStatusError("406 Not Acceptable", request=request, response=response)
+
+
+async def test_create_voucher_falls_back_to_zero_on_taxrate_rejection():
+    """Category rejects 19% → re-book at 0% so the voucher still lands (the live blocker)."""
+    from mcp_lexoffice.server import create_voucher
+
+    client = AsyncMock()
+    client.create_voucher.side_effect = [_taxrate_406(), {"id": "v-8"}]
+    client.get_voucher.return_value = _created_voucher(
+        id="v-8", totalGrossAmount=8.17, totalTaxAmount=0.0, taxType="gross"
+    )
+    ctx = FakeContext(client)
+
+    result = await create_voucher(
+        ctx,
+        total_amount=8.17,
+        voucher_date="2026-06-05",
+        contact_id="vendor-1",
+        category_id="cat-1",
+        tax_rate=19,
+    )
+    parsed = json.loads(result)
+    assert parsed["id"] == "v-8"
+    assert client.create_voucher.await_count == 2
+    retried = client.create_voucher.call_args_list[1][0][0]
+    item = retried["voucherItems"][0]
+    assert item["taxRatePercent"] == 0
+    assert item["taxAmount"] == 0.0
+    assert item["amount"] == 8.17
+    assert retried["totalTaxAmount"] == 0.0
+    assert retried["totalGrossAmount"] == 8.17  # gross == amount when tax is 0
+    assert parsed["_enrichment"]["tax_rate_adjusted"] is True
+    assert "tax_note" in parsed
+
+
+async def test_create_voucher_taxrate_rejection_not_retried_when_already_zero():
+    """A 0% booking that's still rejected isn't a rate problem we can fix → re-raise."""
+    from mcp_lexoffice.server import create_voucher
+
+    client = AsyncMock()
+    client.create_voucher.side_effect = _taxrate_406()
+    ctx = FakeContext(client)
+
+    with pytest.raises(httpx.HTTPStatusError):
+        await create_voucher(
+            ctx,
+            total_amount=8.17,
+            voucher_date="2026-06-05",
+            contact_id="vendor-1",
+            category_id="cat-1",
+            tax_rate=0,
+        )
+    assert client.create_voucher.await_count == 1
+
+
+async def test_create_voucher_non_taxrate_http_error_propagates():
+    """Unrelated HTTP errors are not swallowed by the tax-rate fallback."""
+    from mcp_lexoffice.server import create_voucher
+
+    request = httpx.Request("POST", "https://api.lexoffice.io/v1/vouchers")
+    response = httpx.Response(
+        400, json={"IssueList": [{"source": "voucherDate"}]}, request=request
+    )
+    client = AsyncMock()
+    client.create_voucher.side_effect = httpx.HTTPStatusError(
+        "400", request=request, response=response
+    )
+    ctx = FakeContext(client)
+
+    with pytest.raises(httpx.HTTPStatusError):
+        await create_voucher(
+            ctx,
+            total_amount=8.17,
+            voucher_date="2026-06-05",
+            contact_id="vendor-1",
+            category_id="cat-1",
+            tax_rate=19,
+        )
+    assert client.create_voucher.await_count == 1
 
 
 async def test_attach_voucher_file_tool():

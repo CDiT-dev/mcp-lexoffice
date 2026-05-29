@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.3.4] - 2026-05-29
+
+- fix: upload files as multipart/form-data (Lexoffice /files 500)
+
+
 ## [0.3.3] - 2026-05-25
 
 - feat: add recurring template tools + invoice voucherType fix

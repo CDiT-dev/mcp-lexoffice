@@ -43,10 +43,13 @@ class TestClientInit:
             c = LexofficeClient()
             assert c._client.headers["Accept"] == "application/json"
 
-    def test_content_type_header_set(self):
+    def test_no_default_content_type_header(self):
+        # The client must NOT hardcode a default Content-Type: httpx sets application/json
+        # for json= calls and multipart/form-data (with boundary) for files= uploads. A
+        # hardcoded default shadows the multipart boundary and breaks /files uploads.
         with patch.dict(os.environ, {"LEXOFFICE_API_KEY": "my-key"}):
             c = LexofficeClient()
-            assert c._client.headers["Content-Type"] == "application/json"
+            assert "Content-Type" not in c._client.headers
 
     def test_semaphore_has_value_2(self):
         with patch.dict(os.environ, {"LEXOFFICE_API_KEY": "my-key"}):
@@ -328,11 +331,17 @@ async def test_upload_file_custom_type(client, mock_api):
     assert "type=salesinvoice" in url
 
 
-async def test_upload_file_content_type_header(client, mock_api):
+async def test_upload_file_multipart(client, mock_api):
     route = mock_api.post("/files").respond(200, json={"id": "f-003"})
-    await client.upload_file(b"data", "file.pdf")
+    await client.upload_file(b"%PDF-1.4 data", "file.pdf")
     req = route.calls[0].request
-    assert req.headers.get("content-type") == "application/octet-stream"
+    # Lexoffice /files requires multipart/form-data (with boundary), not octet-stream.
+    assert req.headers.get("content-type", "").startswith("multipart/form-data")
+    body = req.content
+    assert b'name="file"' in body
+    assert b'filename="file.pdf"' in body
+    assert b"application/pdf" in body  # part-level content type from the mime guess
+    assert b"%PDF-1.4 data" in body
 
 
 # ── Payment Conditions ───────────────────────────────────────────────

@@ -28,7 +28,9 @@ class LexofficeClient:
             headers={
                 "Authorization": f"Bearer {api_key}",
                 "Accept": "application/json",
-                "Content-Type": "application/json",
+                # No default Content-Type: httpx sets application/json for json= calls and
+                # multipart/form-data (with boundary) for files= uploads. A hardcoded default
+                # here shadows the multipart boundary and breaks /files uploads (Lexoffice 500).
             },
             timeout=30.0,
         )
@@ -42,6 +44,7 @@ class LexofficeClient:
         params: dict[str, Any] | None = None,
         json: dict[str, Any] | None = None,
         content: bytes | None = None,
+        files: dict[str, Any] | None = None,
         accept: str | None = None,
         content_type: str | None = None,
     ) -> httpx.Response:
@@ -49,16 +52,18 @@ class LexofficeClient:
             headers: dict[str, str] = {}
             if accept:
                 headers["Accept"] = accept
-            if content_type:
+            # Don't set Content-Type when uploading files: httpx must set
+            # multipart/form-data with its own boundary.
+            if content_type and files is None:
                 headers["Content-Type"] = content_type
             resp = await self._client.request(
-                method, path, params=params, json=json, content=content, headers=headers
+                method, path, params=params, json=json, content=content, files=files, headers=headers
             )
             if resp.status_code == 429:
                 retry_after = float(resp.headers.get("Retry-After", "1"))
                 await asyncio.sleep(retry_after)
                 resp = await self._client.request(
-                    method, path, params=params, json=json, content=content, headers=headers
+                    method, path, params=params, json=json, content=content, files=files, headers=headers
                 )
             if resp.status_code >= 400:
                 try:
@@ -321,12 +326,16 @@ class LexofficeClient:
     # ── Files ────────────────────────────────────────────────────────
 
     async def upload_file(self, file_bytes: bytes, file_name: str, file_type: str = "voucher") -> dict:
+        # Lexoffice /v1/files requires multipart/form-data with a `file` part carrying the
+        # filename and a part-level Content-Type. httpx builds this from the files= tuple.
+        import mimetypes
+
+        mime_type = mimetypes.guess_type(file_name)[0] or "application/pdf"
         resp = await self._request(
             "POST",
             "/files",
             params={"type": file_type},
-            content=file_bytes,
-            content_type="application/octet-stream",
+            files={"file": (file_name, file_bytes, mime_type)},
             accept="application/json",
         )
         return resp.json()

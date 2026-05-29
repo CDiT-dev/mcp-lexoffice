@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from unittest.mock import patch
 
@@ -342,6 +343,43 @@ async def test_upload_file_multipart(client, mock_api):
     assert b'filename="file.pdf"' in body
     assert b"application/pdf" in body  # part-level content type from the mime guess
     assert b"%PDF-1.4 data" in body
+
+
+# ── Structured vouchers (CDI-1164) ───────────────────────────────────
+
+
+async def test_create_voucher(client, mock_api):
+    route = mock_api.post("/vouchers").respond(200, json={"id": "v-001"})
+    data = {"type": "purchaseinvoice", "totalGrossAmount": 119.0}
+    result = await client.create_voucher(data)
+    assert result["id"] == "v-001"
+    sent = json.loads(route.calls[0].request.content)
+    assert sent["type"] == "purchaseinvoice"
+
+
+async def test_attach_voucher_file(client, mock_api):
+    route = mock_api.post("/vouchers/v-001/files").respond(
+        200, json={"id": "file-1", "voucherId": "v-001"}
+    )
+    result = await client.attach_voucher_file("v-001", b"%PDF-1.4 data", "invoice.pdf")
+    assert result["id"] == "file-1"
+    assert result["voucherId"] == "v-001"
+
+
+async def test_attach_voucher_file_multipart(client, mock_api):
+    route = mock_api.post("/vouchers/v-001/files").respond(200, json={"id": "file-1"})
+    await client.attach_voucher_file("v-001", b"%PDF-1.4 data", "invoice.pdf")
+    req = route.calls[0].request
+    assert req.headers.get("content-type", "").startswith("multipart/form-data")
+
+
+async def test_list_posting_categories(client, mock_api):
+    mock_api.get("/posting-categories").respond(
+        200, json=[{"id": "c-1", "name": "Reise MA", "type": "outgo"}]
+    )
+    result = await client.list_posting_categories()
+    assert result[0]["id"] == "c-1"
+    assert result[0]["type"] == "outgo"
 
 
 # ── Payment Conditions ───────────────────────────────────────────────

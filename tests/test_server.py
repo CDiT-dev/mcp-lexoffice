@@ -208,13 +208,14 @@ async def test_all_tools_registered():
         "convert_quotation_and_send", "list_quotations",
         "get_contact_invoices", "create_credit_note",
         "list_recurring_templates", "get_recurring_template",
+        "create_voucher", "attach_voucher_file", "list_posting_categories",
     }
     assert expected == names
 
 
 async def test_tool_count():
     tools = await mcp.list_tools()
-    assert len(tools) == 38
+    assert len(tools) == 41
 
 
 # ── Profile tool ─────────────────────────────────────────────────────
@@ -786,6 +787,258 @@ async def test_upload_voucher_case_insensitive_extension():
     result = await upload_voucher(ctx, file_content=content, file_name="BILL.PDF")
     parsed = json.loads(result)
     assert parsed["id"] == "file-upper"
+
+
+# ── Structured voucher creation (CDI-1164) ───────────────────────────
+
+
+def _created_voucher(**overrides):
+    """Default create_voucher round-trip: client.create_voucher then get_voucher read-back."""
+    base = {
+        "id": "v-1",
+        "voucherStatus": "unchecked",
+        "totalGrossAmount": 119.0,
+        "totalTaxAmount": 19.0,
+        "taxType": "gross",
+        "contactId": "vendor-1",
+        "useCollectiveContact": False,
+        "files": [],
+        "version": 1,
+    }
+    base.update(overrides)
+    return base
+
+
+async def test_create_voucher_persists_amount_and_contact():
+    from mcp_lexoffice.server import create_voucher
+
+    ctx = make_ctx({
+        "create_voucher": {"id": "v-1"},
+        "get_voucher": _created_voucher(),
+    })
+    result = await create_voucher(
+        ctx,
+        total_amount=119.0,
+        voucher_date="2026-05-29",
+        contact_id="vendor-1",
+        category_id="cat-1",
+    )
+    parsed = json.loads(result)
+    assert parsed["id"] == "v-1"
+    assert parsed["totalGrossAmount"] == 119.0
+    assert parsed["contactId"] == "vendor-1"
+    assert parsed["_enrichment"]["amount_persisted"] is True
+    assert parsed["_enrichment"]["contact_attached"] is True
+    assert parsed["deepLink"] == "https://app.lexoffice.de/#/voucher/view/v-1"
+
+
+async def test_create_voucher_gross_tax_split():
+    """Gross total at 19% → derived net/tax; item amount stays gross."""
+    from mcp_lexoffice.server import create_voucher
+
+    client = AsyncMock()
+    client.create_voucher.return_value = {"id": "v-2"}
+    client.get_voucher.return_value = _created_voucher(id="v-2")
+    ctx = FakeContext(client)
+
+    await create_voucher(
+        ctx,
+        total_amount=119.0,
+        voucher_date="2026-05-29",
+        contact_id="vendor-1",
+        category_id="cat-1",
+        tax_rate=19,
+    )
+    sent = client.create_voucher.call_args[0][0]
+    assert sent["type"] == "purchaseinvoice"
+    assert sent["taxType"] == "gross"
+    assert sent["totalGrossAmount"] == 119.0
+    item = sent["voucherItems"][0]
+    assert item["amount"] == 119.0
+    assert item["taxAmount"] == 19.0  # 119 - round(119/1.19, 2) = 119 - 100.0
+    assert item["taxRatePercent"] == 19
+    assert item["categoryId"] == "cat-1"
+
+
+async def test_create_voucher_net_unchecked_rejected():
+    from mcp_lexoffice.server import create_voucher
+
+    ctx = make_ctx({})
+    result = await create_voucher(
+        ctx,
+        total_amount=100.0,
+        voucher_date="2026-05-29",
+        tax_type="net",
+        voucher_status="unchecked",
+        category_id="cat-1",
+    )
+    parsed = json.loads(result)
+    assert "error" in parsed
+    assert "net" in parsed["error"].lower()
+
+
+async def test_create_voucher_net_open_allowed():
+    from mcp_lexoffice.server import create_voucher
+
+    client = AsyncMock()
+    client.create_voucher.return_value = {"id": "v-3"}
+    client.get_voucher.return_value = _created_voucher(id="v-3", voucherStatus="open", taxType="net")
+    ctx = FakeContext(client)
+
+    await create_voucher(
+        ctx,
+        total_amount=100.0,
+        voucher_date="2026-05-29",
+        tax_type="net",
+        voucher_status="open",
+        tax_rate=19,
+        category_id="cat-1",
+    )
+    sent = client.create_voucher.call_args[0][0]
+    assert sent["taxType"] == "net"
+    assert sent["totalGrossAmount"] == 119.0
+    item = sent["voucherItems"][0]
+    assert item["amount"] == 100.0
+    assert item["taxAmount"] == 19.0
+
+
+async def test_create_voucher_collective_contact_when_no_id():
+    from mcp_lexoffice.server import create_voucher
+
+    client = AsyncMock()
+    client.create_voucher.return_value = {"id": "v-4"}
+    client.get_voucher.return_value = _created_voucher(id="v-4", contactId=None, useCollectiveContact=True)
+    ctx = FakeContext(client)
+
+    await create_voucher(
+        ctx,
+        total_amount=50.0,
+        voucher_date="2026-05-29",
+        contact_name="Acme Inc",
+        category_id="cat-1",
+    )
+    sent = client.create_voucher.call_args[0][0]
+    assert sent["useCollectiveContact"] is True
+    assert "contactId" not in sent
+    assert sent["contactName"] == "Acme Inc"
+
+
+async def test_create_voucher_resolves_default_category():
+    """No category_id → resolve a contact-optional outgo category and cache it."""
+    from mcp_lexoffice.server import create_voucher
+
+    client = AsyncMock()
+    client.list_posting_categories.return_value = [
+        {"id": "inc-1", "name": "Einnahmen", "type": "income", "contactRequired": False},
+        {"id": "out-req", "name": "Wareneingang", "type": "outgo", "contactRequired": True},
+        {"id": "out-sonstige", "name": "Sonstige Kosten", "type": "outgo", "contactRequired": False},
+    ]
+    client.create_voucher.return_value = {"id": "v-5"}
+    client.get_voucher.return_value = _created_voucher(id="v-5")
+    ctx = FakeContext(client)
+
+    await create_voucher(ctx, total_amount=119.0, voucher_date="2026-05-29", contact_id="vendor-1")
+    sent = client.create_voucher.call_args[0][0]
+    assert sent["voucherItems"][0]["categoryId"] == "out-sonstige"
+    # cached on lifespan context
+    assert ctx.lifespan_context["default_purchase_category_id"] == "out-sonstige"
+
+
+async def test_create_voucher_attaches_file():
+    from mcp_lexoffice.server import create_voucher
+
+    client = AsyncMock()
+    client.create_voucher.return_value = {"id": "v-6"}
+    client.attach_voucher_file.return_value = {"id": "file-1", "voucherId": "v-6"}
+    client.get_voucher.return_value = _created_voucher(id="v-6", files=["file-1"])
+    ctx = FakeContext(client)
+
+    content = base64.b64encode(b"%PDF-1.4 fake").decode()
+    result = await create_voucher(
+        ctx,
+        total_amount=119.0,
+        voucher_date="2026-05-29",
+        contact_id="vendor-1",
+        category_id="cat-1",
+        file_content=content,
+        file_name="invoice.pdf",
+    )
+    parsed = json.loads(result)
+    client.attach_voucher_file.assert_awaited_once()
+    assert parsed["_enrichment"]["file_attached"] is True
+
+
+async def test_create_voucher_file_without_name_errors():
+    from mcp_lexoffice.server import create_voucher
+
+    ctx = make_ctx({})
+    result = await create_voucher(
+        ctx,
+        total_amount=10.0,
+        voucher_date="2026-05-29",
+        category_id="cat-1",
+        file_content="abc",
+    )
+    parsed = json.loads(result)
+    assert "error" in parsed
+    assert "file_name" in parsed["error"]
+
+
+async def test_create_voucher_bad_attachment_type_reported():
+    from mcp_lexoffice.server import create_voucher
+
+    client = AsyncMock()
+    client.create_voucher.return_value = {"id": "v-7"}
+    client.get_voucher.return_value = _created_voucher(id="v-7")
+    ctx = FakeContext(client)
+
+    result = await create_voucher(
+        ctx,
+        total_amount=10.0,
+        voucher_date="2026-05-29",
+        category_id="cat-1",
+        file_content=base64.b64encode(b"x").decode(),
+        file_name="bad.docx",
+    )
+    parsed = json.loads(result)
+    # voucher still created; attachment skipped with an error surfaced
+    assert parsed["id"] == "v-7"
+    assert "attachment_error" in parsed
+    client.attach_voucher_file.assert_not_called()
+
+
+async def test_attach_voucher_file_tool():
+    from mcp_lexoffice.server import attach_voucher_file
+
+    ctx = make_ctx({"attach_voucher_file": {"id": "file-9", "voucherId": "v-9"}})
+    content = base64.b64encode(b"%PDF").decode()
+    result = await attach_voucher_file(ctx, voucher_id="v-9", file_content=content, file_name="b.pdf")
+    parsed = json.loads(result)
+    assert parsed["id"] == "file-9"
+    assert parsed["deepLink"] == "https://app.lexoffice.de/#/voucher/view/v-9"
+
+
+async def test_attach_voucher_file_bad_type():
+    from mcp_lexoffice.server import attach_voucher_file
+
+    ctx = make_ctx({})
+    result = await attach_voucher_file(ctx, voucher_id="v-9", file_content="abc", file_name="x.txt")
+    parsed = json.loads(result)
+    assert "error" in parsed
+
+
+async def test_list_posting_categories_filter():
+    from mcp_lexoffice.server import list_posting_categories
+
+    cats = [
+        {"id": "inc-1", "type": "income"},
+        {"id": "out-1", "type": "outgo"},
+    ]
+    ctx = make_ctx({"list_posting_categories": cats})
+    result = await list_posting_categories(ctx, category_type="outgo")
+    parsed = json.loads(result)
+    assert len(parsed) == 1
+    assert parsed[0]["id"] == "out-1"
 
 
 # ── Financial overview ──────────────────────────────────────────────

@@ -93,6 +93,40 @@ async def _get_tax_config(ctx: Context) -> dict:
     return config
 
 
+async def _default_purchase_category_id(ctx: Context) -> str:
+    """Resolve a sane default expense posting category (Buchungskonto) for purchase
+    vouchers, lazily cached on the lifespan context.
+
+    The Lexoffice docs only list travel categories for purchaseinvoice and recommend the
+    posting-categories endpoint for the full set. We pick a contact-optional 'outgo'
+    category, preferring a generic catch-all expense account; the user can re-book it in
+    'Zu prüfen'. Callers may always override with an explicit category_id."""
+    lc = ctx.lifespan_context
+    if "default_purchase_category_id" in lc:
+        return lc["default_purchase_category_id"]
+    categories = await _client(ctx).list_posting_categories()
+    outgo = [c for c in categories if c.get("type") == "outgo"]
+    preferred = ("sonstige", "betriebsbedarf", "bürobedarf", "buerobedarf", "wareneingang", "wareneinkauf")
+    chosen = None
+    for keyword in preferred:
+        for c in outgo:
+            blob = f"{c.get('name', '')} {c.get('groupName', '')}".lower()
+            if keyword in blob and not c.get("contactRequired", False):
+                chosen = c
+                break
+        if chosen:
+            break
+    if chosen is None:
+        chosen = next((c for c in outgo if not c.get("contactRequired", False)), None)
+    if chosen is None:
+        chosen = outgo[0] if outgo else None
+    if chosen is None:
+        raise RuntimeError("No expense (outgo) posting categories available on this account")
+    category_id = chosen["id"]
+    lc["default_purchase_category_id"] = category_id
+    return category_id
+
+
 def _build_line_items(items: list[dict], *, default_tax_rate: int = 0) -> list[dict]:
     """Convert simplified line items to Lexoffice format."""
     result = []
@@ -797,6 +831,181 @@ async def update_voucher(
     items = _json.loads(voucher_items)
     data = {"version": version, "voucherItems": items}
     result = await _client(ctx).update_voucher(voucher_id, data)
+    return _fmt(result)
+
+
+# ── Structured Voucher Creation (Belegfänger enrichment) ─────────────
+
+
+@mcp.tool
+async def list_posting_categories(
+    ctx: Context,
+    category_type: Annotated[
+        Literal["income", "outgo", "all"],
+        "Filter: income (revenue), outgo (expense), or all",
+    ] = "all",
+) -> str:
+    """[finance] List posting categories (Buchungskonten) with their UUIDs.
+
+    Use an 'outgo' (expense) category id as the category_id when creating purchase
+    vouchers with create_voucher. Each entry includes contactRequired (whether a contact
+    must be attached) and splitAllowed (whether mixed tax rates are permitted)."""
+    categories = await _client(ctx).list_posting_categories()
+    if category_type != "all":
+        categories = [c for c in categories if c.get("type") == category_type]
+    return _fmt(categories)
+
+
+@mcp.tool
+async def create_voucher(
+    ctx: Context,
+    total_amount: Annotated[float, "Total invoice amount. Interpreted per tax_type: a GROSS total (tax included) when tax_type='gross' (default), a NET total when tax_type='net'."],
+    voucher_date: Annotated[str, "Issue date in yyyy-MM-dd format (e.g. 2026-05-29)"],
+    contact_id: Annotated[str | None, "UUID of the vendor contact (resolve via find_or_create_contact). If omitted, the collective vendor contact is used."] = None,
+    contact_name: Annotated[str | None, "Free-text vendor name shown on the voucher (useful with the collective contact when no contact_id is available)."] = None,
+    tax_rate: Annotated[int, "VAT rate percent for the line (e.g. 0, 7, 19)"] = 19,
+    tax_amount: Annotated[float | None, "Override the tax amount. If omitted, it is derived from total_amount and tax_rate."] = None,
+    category_id: Annotated[str | None, "Posting category (Buchungskonto) UUID. If omitted, a default expense category is resolved automatically. Discover ids via list_posting_categories."] = None,
+    tax_type: Annotated[Literal["gross", "net"], "Whether total_amount is gross (tax included) or net. Default gross. NOTE: Lexoffice rejects net vouchers with status 'unchecked' — use gross to land a voucher in 'Zu prüfen'."] = "gross",
+    voucher_status: Annotated[Literal["unchecked", "open"], "unchecked → lands in 'Zu prüfen' (default). open → recorded as an open payable."] = "unchecked",
+    voucher_number: Annotated[str | None, "Vendor's invoice/reference number"] = None,
+    due_date: Annotated[str | None, "Payment due date in yyyy-MM-dd format"] = None,
+    remark: Annotated[str | None, "Free-text remark (full-text searchable in Lexoffice)"] = None,
+    file_content: Annotated[str | None, "Optional base64-encoded receipt file (PDF/PNG/JPG) to attach to the voucher in the same call."] = None,
+    file_name: Annotated[str | None, "File name for file_content (e.g. 'invoice.pdf'). Required if file_content is given."] = None,
+) -> str:
+    """[finance] Create a structured purchase voucher (Beleg) with the amount, tax, and vendor pre-filled.
+
+    Unlike upload_voucher (which lands a raw, un-OCR'd file in Beleg-Eingang), this creates a
+    structured purchaseinvoice voucher so the booking amount + vendor persist — enabling
+    Lexoffice's bank-matching to surface a payment-clearing suggestion. Optionally attaches the
+    original receipt file and reads the voucher back to confirm enrichment stuck.
+
+    Belegfänger flow: resolve the vendor (find_or_create_contact), then call this with the EUR
+    amount, voucher_date, contact_id, and the rendered PDF as file_content."""
+    if tax_type == "net" and voucher_status == "unchecked":
+        return _fmt({
+            "error": (
+                "Lexoffice rejects net vouchers with status 'unchecked'. "
+                "Use tax_type='gross' (recommended for receipts — the amount is already gross) "
+                "or set voucher_status='open'."
+            ),
+        })
+    if file_content and not file_name:
+        return _fmt({"error": "file_name is required when file_content is provided"})
+
+    rate = tax_rate
+    if tax_type == "gross":
+        gross = round(total_amount, 2)
+        if tax_amount is not None:
+            tax = round(tax_amount, 2)
+        elif rate:
+            net = round(gross / (1 + rate / 100), 2)
+            tax = round(gross - net, 2)
+        else:
+            tax = 0.0
+        item_amount = gross
+        total_gross = gross
+    else:  # net
+        net = round(total_amount, 2)
+        tax = round(tax_amount if tax_amount is not None else net * rate / 100, 2)
+        item_amount = net
+        total_gross = round(net + tax, 2)
+    total_tax = tax
+
+    data: dict[str, Any] = {
+        "type": "purchaseinvoice",
+        "voucherStatus": voucher_status,
+        "voucherDate": voucher_date,
+        "totalGrossAmount": total_gross,
+        "totalTaxAmount": total_tax,
+        "taxType": tax_type,
+        "voucherItems": [
+            {
+                "amount": item_amount,
+                "taxAmount": tax,
+                "taxRatePercent": rate,
+                "categoryId": category_id or await _default_purchase_category_id(ctx),
+            }
+        ],
+    }
+    if voucher_number:
+        data["voucherNumber"] = voucher_number
+    if due_date:
+        data["dueDate"] = due_date
+    if remark:
+        data["remark"] = remark
+    if contact_id:
+        data["useCollectiveContact"] = False
+        data["contactId"] = contact_id
+    else:
+        data["useCollectiveContact"] = True
+    if contact_name:
+        data["contactName"] = contact_name
+
+    created = await _client(ctx).create_voucher(data)
+    voucher_id = created.get("id", "")
+
+    attachment_error = None
+    if file_content and voucher_id:
+        allowed_ext = (".pdf", ".png", ".jpg", ".jpeg")
+        if not any(file_name.lower().endswith(ext) for ext in allowed_ext):
+            attachment_error = f"Unsupported file type. Allowed: {', '.join(allowed_ext)}"
+        else:
+            file_bytes = base64.b64decode(file_content)
+            if len(file_bytes) > 5 * 1024 * 1024:
+                attachment_error = "File exceeds 5MB Lexoffice upload limit"
+            else:
+                await _client(ctx).attach_voucher_file(voucher_id, file_bytes, file_name)
+
+    # Read back to confirm enrichment persisted (the failure mode CDI-1164 was opened for).
+    persisted = await _client(ctx).get_voucher(voucher_id) if voucher_id else created
+    result: dict[str, Any] = {
+        "id": voucher_id,
+        "voucherStatus": persisted.get("voucherStatus"),
+        "voucherNumber": persisted.get("voucherNumber"),
+        "totalGrossAmount": persisted.get("totalGrossAmount"),
+        "totalTaxAmount": persisted.get("totalTaxAmount"),
+        "taxType": persisted.get("taxType"),
+        "contactId": persisted.get("contactId"),
+        "contactName": persisted.get("contactName"),
+        "useCollectiveContact": persisted.get("useCollectiveContact"),
+        "files": persisted.get("files", []),
+        "version": persisted.get("version"),
+        "deepLink": _deep_link(voucher_id),
+        "_enrichment": {
+            "amount_persisted": bool(persisted.get("totalGrossAmount")),
+            "contact_attached": bool(persisted.get("contactId")) or bool(persisted.get("useCollectiveContact")),
+            "file_attached": bool(persisted.get("files")),
+        },
+    }
+    if attachment_error:
+        result["_enrichment"]["file_attached"] = False
+        result["attachment_error"] = attachment_error
+    return _fmt(result)
+
+
+@mcp.tool
+async def attach_voucher_file(
+    ctx: Context,
+    voucher_id: Annotated[str, "UUID of the voucher to attach the file to"],
+    file_content: Annotated[str, "Base64-encoded file content (PDF, PNG, or JPG, max 5MB)"],
+    file_name: Annotated[str, "Original file name (e.g. 'invoice.pdf')"],
+) -> str:
+    """[finance] Attach a receipt/invoice file (the original Beleg) to an existing voucher.
+
+    Use after create_voucher when you need to attach the file separately. POST to
+    /v1/vouchers/{id}/files. Returns the file id and voucher id."""
+    allowed_ext = (".pdf", ".png", ".jpg", ".jpeg")
+    if not any(file_name.lower().endswith(ext) for ext in allowed_ext):
+        return _fmt({"error": f"Unsupported file type. Allowed: {', '.join(allowed_ext)}"})
+
+    file_bytes = base64.b64decode(file_content)
+    if len(file_bytes) > 5 * 1024 * 1024:
+        return _fmt({"error": "File exceeds 5MB Lexoffice upload limit"})
+
+    result = await _client(ctx).attach_voucher_file(voucher_id, file_bytes, file_name)
+    result["deepLink"] = _deep_link(voucher_id)
     return _fmt(result)
 
 

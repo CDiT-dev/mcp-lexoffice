@@ -29,7 +29,7 @@ LEXOFFICE_API_KEY='op://Vault/item-id/API key' python -m mcp_lexoffice.server
 - Per-item `tax_rate` override available on invoices, quotations, and articles
 - Default payment terms: "Zahlbar sofort, rein netto"
 
-## Tools (38 total)
+## Tools (41 total)
 - **Invoices**: create_draft_invoice, create_and_send_invoice, finalize_invoice, send_invoice, get_invoice, get_invoice_pdf, list_invoices, delete_draft_invoice
 - **Financial**: list_expenses, get_financial_overview, get_payment_status
 - **Contacts**: search_contacts, get_contact, create_contact, update_contact, find_or_create_contact, get_contact_invoices
@@ -38,7 +38,8 @@ LEXOFFICE_API_KEY='op://Vault/item-id/API key' python -m mcp_lexoffice.server
 - **Credit Notes**: create_credit_note
 - **Dunnings**: create_dunning, render_dunning_pdf
 - **Articles**: list_articles, create_article, get_article, update_article
-- **Other**: upload_voucher, get_profile, list_vouchers, get_voucher, update_voucher, list_payment_conditions, list_countries
+- **Vouchers**: upload_voucher (raw file → Beleg-Eingang), create_voucher (structured purchaseinvoice w/ amount+vendor, optional PDF attach + read-back), attach_voucher_file, get_voucher, update_voucher, list_vouchers, list_posting_categories
+- **Other**: get_profile, list_payment_conditions, list_countries
 
 ## API Notes
 - Rate limit: 2 requests/second (HTTP 429 on exceed, auto-retry with Retry-After)
@@ -46,6 +47,7 @@ LEXOFFICE_API_KEY='op://Vault/item-id/API key' python -m mcp_lexoffice.server
 - Invoice statuses: draft → open (finalized) → paidoff / voided
 - All tools return deep links to Lexoffice UI
 - Base URL migrating from lexoffice.io to lexware.io (both work currently)
+- **Structured vouchers** (`POST /v1/vouchers`): each voucherItem needs a `categoryId` (Buchungskonto — discover via `list_posting_categories`; `create_voucher` auto-resolves a default `outgo` category if none given). Lexoffice **rejects `taxType=net` + `voucherStatus=unchecked`** — use `gross` to land a voucher in "Zu prüfen", or `open` for net. Only `open` and `unchecked` statuses are writeable. File attach is `POST /v1/vouchers/{id}/files` (multipart field `file`).
 
 ## Testing
 ```bash

@@ -307,6 +307,38 @@ class LexofficeClient:
         resp = await self._request("PUT", f"/vouchers/{voucher_id}", json=data)
         return resp.json()
 
+    async def create_voucher(self, data: dict) -> dict:
+        """Create a structured bookkeeping voucher (Beleg) via POST /v1/vouchers.
+
+        Unlike upload_file (which lands a raw, un-OCR'd file in Beleg-Eingang), this
+        creates a voucher with persisted amount, tax, and contact — the structured
+        object Lexoffice can use for bank-matching."""
+        resp = await self._request("POST", "/vouchers", json=data)
+        return resp.json()
+
+    async def attach_voucher_file(
+        self, voucher_id: str, file_bytes: bytes, file_name: str
+    ) -> dict:
+        """Attach a file (the original Beleg) to an existing voucher.
+
+        POST /v1/vouchers/{id}/files expects multipart/form-data with a `file` part."""
+        import mimetypes
+
+        mime_type = mimetypes.guess_type(file_name)[0] or "application/pdf"
+        resp = await self._request(
+            "POST",
+            f"/vouchers/{voucher_id}/files",
+            files={"file": (file_name, file_bytes, mime_type)},
+            accept="application/json",
+        )
+        return resp.json()
+
+    async def list_posting_categories(self) -> list[dict]:
+        """List posting categories (Buchungskonten) with their UUIDs, type (income/outgo),
+        and contactRequired/splitAllowed flags."""
+        resp = await self._request("GET", "/posting-categories")
+        return resp.json()
+
     # ── Recurring Templates ────────────────────────────────────────
 
     async def list_recurring_templates(self) -> list[dict]:

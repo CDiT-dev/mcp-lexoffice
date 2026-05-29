@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.3.7] - 2026-05-29
+
+- fix(create_voucher): fall back to 0% VAT when posting category rejects the rate
+
+
 ## [0.3.6] - 2026-05-29
 
 - fix: derive __version__ from package metadata to stop health version drift

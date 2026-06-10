@@ -3,7 +3,7 @@
 MCP server for **Lexware Office** (formerly Lexoffice) — Python + FastMCP 3.
 
 ## Stack
-- Python 3.11+, FastMCP 3.x, httpx, python-dotenv
+- Python 3.11+, FastMCP `>=3.4.2,<4.0.0`, httpx, python-dotenv
 - Lexware Office REST API (`https://api.lexoffice.io/v1`)
 - Transport: streamable-http with `json_response=True` (port 8000)
 - Auth: Bearer token from env/.env (with `op://` 1Password fallback)
@@ -41,6 +41,47 @@ LEXOFFICE_API_KEY='op://Vault/item-id/API key' python -m mcp_lexoffice.server
 - **Vouchers**: upload_voucher (raw file → Beleg-Eingang), create_voucher (structured purchaseinvoice w/ amount+vendor, optional PDF attach + read-back), attach_voucher_file, get_voucher, update_voucher, list_vouchers, list_posting_categories
 - **Other**: get_profile, list_payment_conditions, list_countries
 
+All 41 tools carry MCP annotations (`readOnlyHint` on reads, `destructiveHint` on
+finalize/send/delete, `idempotentHint`, `openWorldHint`, human `title`) and first-class
+`tags` (e.g. `finance`, `invoice`, `irreversible`, `belegfaenger`).
+
+### Typed output schemas
+36 of the 41 tools return typed Pydantic models, so fastmcp advertises a per-tool
+`output_schema` and emits machine-validated structured content alongside the human-readable
+JSON. Reusable domain models live in `server.py`: `Profile`, `Invoice`, `VoucherList`
+(+`VoucherListEntry`), `Contact`/`ContactList`, `Quotation`, `Article`/`ArticleList`,
+`Voucher`, `CreateVoucherResult`, `CreditNote`, `Dunning`, `RecurringTemplate`, `DocumentRef`,
+`FileRef`, `SendResult`, `DeleteResult`, `SentInvoiceResult`, plus the pass-1
+`FinancialOverview`. Each is reused across sibling get/list/create/finalize tools.
+
+**Backward-compat contract** (a manually-synced Cloudflare portal + live clients depend on it):
+every model subclasses `LexofficeBase` with `ConfigDict(populate_by_name=True, extra="allow")`
+and an optional `error: str | None`. Declared fields use the EXACT current camelCase wire keys
+(via field name or `serialization_alias`), `extra="allow"` carries the rest of the Lexoffice
+object graph (and conditionally-injected keys like `daysOverdue` / `_note` / `_enrichment` /
+`_action`) verbatim, and every model validates BOTH the success and the `{"error": ...}`
+short-circuit payload — so the structured schema never explodes on the error path.
+
+The 5 tools still returning a raw JSON string do so deliberately: `list_countries`,
+`list_posting_categories`, `list_payment_conditions`, `list_recurring_templates` return bare
+JSON arrays (a typed `list[Model]` return makes fastmcp wrap them under a `result` key, which
+would change the wire shape), and `get_payment_status` is polymorphic (dict | list | error).
+
+`get_financial_overview` additionally sets a `truncated` flag when an underlying voucher page
+hits the 250-row cap.
+
+## Resources (`lexoffice://`)
+Reference/context data exposed as resources so the model can pull it without a tool call:
+- `lexoffice://service-catalog` — standard offerings + pricing (static)
+- `lexoffice://countries`, `lexoffice://posting-categories`, `lexoffice://payment-conditions` — live API reference data
+- `lexoffice://tax-config` — auto-detected tax regime + default VAT rate
+- `lexoffice://status` — service name, version, uptime (mirrors `/health`)
+
+## Prompts (guided workflows)
+- `monthly_close` — overview → overdue invoices → suggested dunnings
+- `dunning_run` — find overdue open invoices and walk creating Mahnungen
+- `capture_receipt` — Belegfänger flow: find_or_create_contact → create_voucher (+ optional PDF)
+
 ## API Notes
 - Rate limit: 2 requests/second (HTTP 429 on exceed, auto-retry with Retry-After)
 - All mutations use optimistic locking via `version` field
@@ -53,5 +94,5 @@ LEXOFFICE_API_KEY='op://Vault/item-id/API key' python -m mcp_lexoffice.server
 ```bash
 source .venv/bin/activate
 pip install -e ".[test]"
-python -m pytest tests/ -v  # 204 tests
+python -m pytest tests/ -v  # 272 tests
 ```

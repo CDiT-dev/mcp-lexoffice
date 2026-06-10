@@ -10,8 +10,9 @@ from typing import Annotated, Any, Literal
 
 import httpx
 from fastmcp import FastMCP, Context
+from fastmcp.exceptions import ToolError
 from mcp.types import Icon, ToolAnnotations
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_serializer
 
 from .client import LexofficeClient
 
@@ -179,6 +180,77 @@ class LexofficeBase(BaseModel):
 def _model(cls: type[BaseModel], payload: dict[str, Any]) -> BaseModel:
     """Validate a (camelCase) Lexoffice/handler dict into a typed model, preserving extras."""
     return cls.model_validate(payload)
+
+
+class LexofficeListItem(BaseModel):
+    """Permissive base for the *array-element* models behind the four bare-JSON-array tools
+    (list_countries / list_posting_categories / list_payment_conditions /
+    list_recurring_templates).
+
+    Same validate-both-paths guarantees as ``LexofficeBase`` (extra="allow",
+    populate_by_name, optional ``error``) BUT with one deliberate serialization difference: a
+    ``model_serializer`` drops declared fields that are ``None`` so the on-wire JSON array stays
+    byte-for-structure equivalent to the previous ``json.dumps(list)`` text — i.e. a row that the
+    API returned as ``{"countryCode": "DE"}`` serializes as exactly that, NOT
+    ``{"countryCode": "DE", "error": null, ...}``.
+
+    Why this differs from ``LexofficeBase``: the object-returning tools already emit their
+    declared ``null`` keys (that text shape was locked in by the pass-1/2 uplift and the portal
+    re-synced to it). But these four tools return a *bare array*; rule 2's "same array"
+    backward-compat constraint is strongest there, so injecting per-element ``error: null`` /
+    ``deepLink: null`` would change the element shape. Dropping ``None`` keeps the unstructured
+    text an equivalent JSON array while still advertising a typed, additive ``structured_content``
+    (verified end-to-end with an in-memory fastmcp Client). The optional ``error`` keeps rule 3
+    satisfied: an ``{"error": "..."}`` payload still validates against the same schema.
+    """
+
+    model_config = ConfigDict(populate_by_name=True, extra="allow")
+
+    error: str | None = Field(default=None, description="Set only on an error payload; absent otherwise")
+
+    @model_serializer(mode="wrap")
+    def _drop_none(self, handler):
+        return {k: v for k, v in handler(self).items() if v is not None}
+
+
+class Country(LexofficeListItem):
+    """One row of GET /countries (list_countries)."""
+
+    countryCode: str | None = None
+    taxClassification: str | None = None
+
+
+class PostingCategory(LexofficeListItem):
+    """One Buchungskonto row of GET /posting-categories (list_posting_categories)."""
+
+    id: str | None = None
+    name: str | None = None
+    type: str | None = None
+    contactRequired: bool | None = None
+    splitAllowed: bool | None = None
+    groupName: str | None = None
+
+
+class PaymentCondition(LexofficeListItem):
+    """One row of GET /payment-conditions (list_payment_conditions)."""
+
+    id: str | None = None
+    paymentTermLabel: str | None = None
+    paymentTermLabelTemplate: str | None = None
+    paymentTermDuration: int | None = None
+    organizationDefault: bool | None = None
+
+
+class RecurringTemplateSummary(LexofficeListItem):
+    """One row of GET /recurring-templates (list_recurring_templates), with the server-injected
+    ``deepLink``. Mirrors the detail ``RecurringTemplate`` model but stays permissive for the
+    list shape."""
+
+    id: str | None = None
+    organizationId: str | None = None
+    title: str | None = None
+    recurringTemplateSettings: dict[str, Any] | None = None
+    deepLink: str | None = None
 
 
 class Profile(LexofficeBase):
@@ -676,7 +748,10 @@ async def delete_draft_invoice(
     invoice = await _client(ctx).get_invoice(invoice_id)
     status = invoice.get("voucherStatus", "")
     if status != "draft":
-        return DeleteResult.model_validate({"error": f"Cannot delete invoice with status '{status}'. Only drafts can be deleted.", "deepLink": _deep_link(invoice_id)})
+        raise ToolError(
+            f"Cannot delete invoice with status '{status}'. Only drafts can be deleted. "
+            f"Review it at {_deep_link(invoice_id)}"
+        )
 
     await _client(ctx).delete_invoice(invoice_id)
     return DeleteResult.model_validate({"status": "deleted", "invoice_id": invoice_id})
@@ -701,7 +776,10 @@ async def send_invoice(
     invoice = await _client(ctx).get_invoice(invoice_id)
     status = invoice.get("voucherStatus", "")
     if status == "draft":
-        return SendResult.model_validate({"error": "Invoice is still a draft. Finalize it first.", "deepLink": _deep_link(invoice_id, edit=True)})
+        raise ToolError(
+            "Invoice is still a draft. Finalize it first. "
+            f"Edit it at {_deep_link(invoice_id, edit=True)}"
+        )
 
     await _client(ctx).send_invoice(invoice_id, recipient_email)
     return SendResult.model_validate({"status": "sent", "invoice_id": invoice_id, "recipient": recipient_email})
@@ -820,11 +898,11 @@ async def upload_voucher(
     Accepts PDF, PNG, or JPG files up to 5MB. The file appears in Lexoffice 'Zu prüfen'."""
     allowed_ext = (".pdf", ".png", ".jpg", ".jpeg")
     if not any(file_name.lower().endswith(ext) for ext in allowed_ext):
-        return FileRef.model_validate({"error": f"Unsupported file type. Allowed: {', '.join(allowed_ext)}"})
+        raise ToolError(f"Unsupported file type. Allowed: {', '.join(allowed_ext)}")
 
     file_bytes = base64.b64decode(file_content)
     if len(file_bytes) > 5 * 1024 * 1024:
-        return FileRef.model_validate({"error": "File exceeds 5MB Lexoffice upload limit"})
+        raise ToolError("File exceeds 5MB Lexoffice upload limit")
 
     result = await _client(ctx).upload_file(file_bytes, file_name)
     return FileRef.model_validate(result)
@@ -944,7 +1022,15 @@ async def get_payment_status(
     invoice_id: Annotated[str | None, "UUID of a specific invoice"] = None,
     contact_name: Annotated[str | None, "Search open invoices by contact name"] = None,
 ) -> str:
-    """[finance] Check payment status for an invoice (by ID) or all open invoices for a contact."""
+    """[finance] Check payment status for an invoice (by ID) or all open invoices for a contact.
+
+    Deliberately returns a raw JSON *string* (not a typed model). Its payload is genuinely
+    polymorphic by branch: a single payments OBJECT when called by invoice_id (the Lexoffice
+    GET /payments/{id} shape), versus an ARRAY of per-invoice payment summaries when called by
+    contact_name. A typed return can't represent "object XOR array" without changing one
+    branch's wire shape (e.g. wrapping the object in a list), so this stays str for
+    backward-compat. The missing-arg case now raises ToolError instead of returning an error
+    envelope, unifying error signalling with the rest of the server."""
     if invoice_id:
         result = await _client(ctx).get_payments(invoice_id)
         return _fmt(result)
@@ -973,7 +1059,7 @@ async def get_payment_status(
             })
         return _fmt(results)
 
-    return _fmt({"error": "Provide either invoice_id or contact_name"})
+    raise ToolError("Provide either invoice_id or contact_name")
 
 
 # ── Contacts ─────────────────────────────────────────────────────────
@@ -1068,7 +1154,7 @@ async def create_contact(
         if last_name:
             data["person"]["lastName"] = last_name
     else:
-        return Contact.model_validate({"error": "Provide either company_name or first_name/last_name"})
+        raise ToolError("Provide either company_name or first_name/last_name")
 
     if email:
         data["emailAddresses"] = {"business": [email]}
@@ -1222,7 +1308,10 @@ async def pursue_quotation_to_invoice(
     quotation = await _client(ctx).get_quotation(quotation_id)
     status = quotation.get("voucherStatus", "")
     if status == "draft":
-        return Invoice.model_validate({"error": "Quotation is still a draft. Finalize it first.", "deepLink": _deep_link(quotation_id, edit=True)})
+        raise ToolError(
+            "Quotation is still a draft. Finalize it first. "
+            f"Edit it at {_deep_link(quotation_id, edit=True)}"
+        )
 
     result = await _client(ctx).pursue_quotation(quotation_id)
     invoice_id = result.get("id", "")
@@ -1491,7 +1580,7 @@ async def list_posting_categories(
         Literal["income", "outgo", "all"],
         "Filter: income (revenue), outgo (expense), or all",
     ] = "all",
-) -> str:
+) -> list[PostingCategory]:
     """[finance] List posting categories (Buchungskonten) with their UUIDs.
 
     Use an 'outgo' (expense) category id as the category_id when creating purchase
@@ -1500,7 +1589,7 @@ async def list_posting_categories(
     categories = await _client(ctx).list_posting_categories()
     if category_type != "all":
         categories = [c for c in categories if c.get("type") == category_type]
-    return _fmt(categories)
+    return [PostingCategory.model_validate(c) for c in categories]
 
 
 @mcp.tool(
@@ -1545,15 +1634,13 @@ async def create_voucher(
     re-booked at 0% VAT so it still lands with the amount + vendor; the response sets
     _enrichment.tax_rate_adjusted and a tax_note. Re-book the VAT during review."""
     if tax_type == "net" and voucher_status == "unchecked":
-        return CreateVoucherResult.model_validate({
-            "error": (
-                "Lexoffice rejects net vouchers with status 'unchecked'. "
-                "Use tax_type='gross' (recommended for receipts — the amount is already gross) "
-                "or set voucher_status='open'."
-            ),
-        })
+        raise ToolError(
+            "Lexoffice rejects net vouchers with status 'unchecked'. "
+            "Use tax_type='gross' (recommended for receipts — the amount is already gross) "
+            "or set voucher_status='open'."
+        )
     if file_content and not file_name:
-        return CreateVoucherResult.model_validate({"error": "file_name is required when file_content is provided"})
+        raise ToolError("file_name is required when file_content is provided")
 
     rate = tax_rate
     if tax_type == "gross":
@@ -1700,11 +1787,11 @@ async def attach_voucher_file(
     /v1/vouchers/{id}/files. Returns the file id and voucher id."""
     allowed_ext = (".pdf", ".png", ".jpg", ".jpeg")
     if not any(file_name.lower().endswith(ext) for ext in allowed_ext):
-        return FileRef.model_validate({"error": f"Unsupported file type. Allowed: {', '.join(allowed_ext)}"})
+        raise ToolError(f"Unsupported file type. Allowed: {', '.join(allowed_ext)}")
 
     file_bytes = base64.b64decode(file_content)
     if len(file_bytes) > 5 * 1024 * 1024:
-        return FileRef.model_validate({"error": "File exceeds 5MB Lexoffice upload limit"})
+        raise ToolError("File exceeds 5MB Lexoffice upload limit")
 
     result = await _client(ctx).attach_voucher_file(voucher_id, file_bytes, file_name)
     result["deepLink"] = _deep_link(voucher_id)
@@ -1723,10 +1810,10 @@ async def attach_voucher_file(
         openWorldHint=True,
     ),
 )
-async def list_payment_conditions(ctx: Context) -> str:
+async def list_payment_conditions(ctx: Context) -> list[PaymentCondition]:
     """[finance] List all configured payment conditions (Zahlungsbedingungen)."""
     result = await _client(ctx).list_payment_conditions()
-    return _fmt(result)
+    return [PaymentCondition.model_validate(c) for c in result]
 
 
 # ── Utilities ────────────────────────────────────────────────────────
@@ -1741,10 +1828,10 @@ async def list_payment_conditions(ctx: Context) -> str:
         openWorldHint=True,
     ),
 )
-async def list_countries(ctx: Context) -> str:
+async def list_countries(ctx: Context) -> list[Country]:
     """[finance] List all countries with their tax classification (DE, intraCommunity, thirdPartyCountry)."""
     result = await _client(ctx).list_countries()
-    return _fmt(result)
+    return [Country.model_validate(c) for c in result]
 
 
 # ── Recurring Templates ────────────────────────────────────────────
@@ -1759,7 +1846,7 @@ async def list_countries(ctx: Context) -> str:
         openWorldHint=True,
     ),
 )
-async def list_recurring_templates(ctx: Context) -> str:
+async def list_recurring_templates(ctx: Context) -> list[RecurringTemplateSummary]:
     """[finance] List all recurring invoice templates (Abo-Rechnungen).
 
     Shows scheduled invoices that are automatically created on a recurring basis.
@@ -1769,7 +1856,7 @@ async def list_recurring_templates(ctx: Context) -> str:
         for item in result:
             tid = item.get("id", "")
             item["deepLink"] = f"{LEXOFFICE_UI}/#/permalink/recurring-templates/view/{tid}"
-    return _fmt(result)
+    return [RecurringTemplateSummary.model_validate(item) for item in result]
 
 
 @mcp.tool(
@@ -1955,7 +2042,10 @@ async def convert_quotation_and_send(
     quotation = await _client(ctx).get_quotation(quotation_id)
     status = quotation.get("voucherStatus", "")
     if status == "draft":
-        return SentInvoiceResult.model_validate({"error": "Quotation is still a draft. Finalize it first.", "deepLink": _deep_link(quotation_id, edit=True)})
+        raise ToolError(
+            "Quotation is still a draft. Finalize it first. "
+            f"Edit it at {_deep_link(quotation_id, edit=True)}"
+        )
 
     await ctx.info("Converting quotation to draft invoice")
     pursued = await _client(ctx).pursue_quotation(quotation_id)
@@ -2022,18 +2112,28 @@ async def get_contact_invoices(
 
     Use when the user asks 'show all invoices for Acme GmbH' or 'what did we bill StoryKeep?'."""
     if not contact_id and not contact_name:
-        return VoucherList.model_validate({"error": "Provide either contact_id or contact_name"})
+        raise ToolError("Provide either contact_id or contact_name")
 
     if not contact_id:
         contacts = await _client(ctx).filter_contacts(name=contact_name)
         matches = contacts.get("content", [])
         if not matches:
-            return VoucherList.model_validate({"error": f"No contact found matching '{contact_name}'"})
+            raise ToolError(f"No contact found matching '{contact_name}'")
         if len(matches) > 1:
-            return VoucherList.model_validate({
-                "error": f"Multiple contacts match '{contact_name}'. Provide a contact_id.",
-                "contacts": [{"id": c.get("id"), "name": c.get("company", {}).get("name") or f"{c.get('person', {}).get('firstName', '')} {c.get('person', {}).get('lastName', '')}".strip()} for c in matches],
-            })
+            def _label(c: dict) -> str:
+                company = (c.get("company") or {}).get("name")
+                if company:
+                    name = company
+                else:
+                    person = c.get("person") or {}
+                    name = f"{person.get('firstName', '')} {person.get('lastName', '')}".strip()
+                return f"{name} ({c.get('id')})"
+
+            candidates = ", ".join(_label(c) for c in matches)
+            raise ToolError(
+                f"Multiple contacts match '{contact_name}'. Provide a contact_id. "
+                f"Candidates: {candidates}"
+            )
         contact_id = matches[0].get("id", "")
 
     result = await _client(ctx).filter_vouchers(

@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.3.9] - 2026-06-10
+
+- feat: fastmcp 3.4.2 uplift — annotations, structured output, resources, prompts, context (#16)
+
+
 ## [0.3.8] - 2026-05-29
 
 - fix(create_voucher): default purchase category to 'Lizenzen und Konzessionen'

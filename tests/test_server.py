@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, patch
 import httpx
 import pytest
 
+from fastmcp.exceptions import ToolError
 from pydantic import BaseModel
 
 from mcp_lexoffice.server import (
@@ -39,6 +40,11 @@ def as_dict(result):
     """
     if isinstance(result, BaseModel):
         return result.model_dump(by_alias=True)
+    if isinstance(result, list):
+        # A list[Model] tool return (the four bare-array tools now type their rows). Dump each
+        # element by alias so callers keep asserting parsed[i]["camelCaseKey"]. model_dump on the
+        # row applies the None-dropping serializer, mirroring the on-wire array exactly.
+        return [item.model_dump(by_alias=True) if isinstance(item, BaseModel) else item for item in result]
     if isinstance(result, str):
         return json.loads(result)
     return result
@@ -466,11 +472,11 @@ async def test_send_invoice_blocks_draft():
     from mcp_lexoffice.server import send_invoice
 
     ctx = make_ctx({"get_invoice": {"id": "inv-1", "voucherStatus": "draft"}})
-    result = await send_invoice(ctx, invoice_id="inv-1", recipient_email="test@test.de")
-    parsed = as_dict(result)
-    assert "error" in parsed
-    assert "draft" in parsed["error"].lower()
-    assert "/edit/" in parsed["deepLink"]
+    with pytest.raises(ToolError) as exc:
+        await send_invoice(ctx, invoice_id="inv-1", recipient_email="test@test.de")
+    msg = str(exc.value)
+    assert "draft" in msg.lower()
+    assert "/edit/" in msg
 
 
 async def test_send_invoice_finalized():
@@ -772,28 +778,25 @@ async def test_upload_voucher_bad_type():
     from mcp_lexoffice.server import upload_voucher
 
     ctx = make_ctx({})
-    result = await upload_voucher(ctx, file_content="abc", file_name="file.docx")
-    parsed = as_dict(result)
-    assert "error" in parsed
-    assert "Unsupported" in parsed["error"]
+    with pytest.raises(ToolError) as exc:
+        await upload_voucher(ctx, file_content="abc", file_name="file.docx")
+    assert "Unsupported" in str(exc.value)
 
 
 async def test_upload_voucher_bad_type_txt():
     from mcp_lexoffice.server import upload_voucher
 
     ctx = make_ctx({})
-    result = await upload_voucher(ctx, file_content="abc", file_name="notes.txt")
-    parsed = as_dict(result)
-    assert "error" in parsed
+    with pytest.raises(ToolError):
+        await upload_voucher(ctx, file_content="abc", file_name="notes.txt")
 
 
 async def test_upload_voucher_bad_type_xlsx():
     from mcp_lexoffice.server import upload_voucher
 
     ctx = make_ctx({})
-    result = await upload_voucher(ctx, file_content="abc", file_name="data.xlsx")
-    parsed = as_dict(result)
-    assert "error" in parsed
+    with pytest.raises(ToolError):
+        await upload_voucher(ctx, file_content="abc", file_name="data.xlsx")
 
 
 async def test_upload_voucher_too_large():
@@ -801,10 +804,9 @@ async def test_upload_voucher_too_large():
 
     ctx = make_ctx({})
     big = base64.b64encode(b"x" * (6 * 1024 * 1024)).decode()
-    result = await upload_voucher(ctx, file_content=big, file_name="huge.pdf")
-    parsed = as_dict(result)
-    assert "error" in parsed
-    assert "5MB" in parsed["error"]
+    with pytest.raises(ToolError) as exc:
+        await upload_voucher(ctx, file_content=big, file_name="huge.pdf")
+    assert "5MB" in str(exc.value)
 
 
 async def test_upload_voucher_exactly_5mb():
@@ -905,17 +907,16 @@ async def test_create_voucher_net_unchecked_rejected():
     from mcp_lexoffice.server import create_voucher
 
     ctx = make_ctx({})
-    result = await create_voucher(
-        ctx,
-        total_amount=100.0,
-        voucher_date="2026-05-29",
-        tax_type="net",
-        voucher_status="unchecked",
-        category_id="cat-1",
-    )
-    parsed = as_dict(result)
-    assert "error" in parsed
-    assert "net" in parsed["error"].lower()
+    with pytest.raises(ToolError) as exc:
+        await create_voucher(
+            ctx,
+            total_amount=100.0,
+            voucher_date="2026-05-29",
+            tax_type="net",
+            voucher_status="unchecked",
+            category_id="cat-1",
+        )
+    assert "net" in str(exc.value).lower()
 
 
 async def test_create_voucher_net_open_allowed():
@@ -1054,16 +1055,15 @@ async def test_create_voucher_file_without_name_errors():
     from mcp_lexoffice.server import create_voucher
 
     ctx = make_ctx({})
-    result = await create_voucher(
-        ctx,
-        total_amount=10.0,
-        voucher_date="2026-05-29",
-        category_id="cat-1",
-        file_content="abc",
-    )
-    parsed = as_dict(result)
-    assert "error" in parsed
-    assert "file_name" in parsed["error"]
+    with pytest.raises(ToolError) as exc:
+        await create_voucher(
+            ctx,
+            total_amount=10.0,
+            voucher_date="2026-05-29",
+            category_id="cat-1",
+            file_content="abc",
+        )
+    assert "file_name" in str(exc.value)
 
 
 async def test_create_voucher_bad_attachment_type_reported():
@@ -1198,9 +1198,8 @@ async def test_attach_voucher_file_bad_type():
     from mcp_lexoffice.server import attach_voucher_file
 
     ctx = make_ctx({})
-    result = await attach_voucher_file(ctx, voucher_id="v-9", file_content="abc", file_name="x.txt")
-    parsed = as_dict(result)
-    assert "error" in parsed
+    with pytest.raises(ToolError):
+        await attach_voucher_file(ctx, voucher_id="v-9", file_content="abc", file_name="x.txt")
 
 
 async def test_list_posting_categories_filter():
@@ -1358,9 +1357,9 @@ async def test_get_payment_status_no_params():
     from mcp_lexoffice.server import get_payment_status
 
     ctx = make_ctx({})
-    result = await get_payment_status(ctx)
-    parsed = as_dict(result)
-    assert "error" in parsed
+    with pytest.raises(ToolError) as exc:
+        await get_payment_status(ctx)
+    assert "invoice_id" in str(exc.value)
 
 
 async def test_get_payment_status_by_contact_name():
@@ -1480,9 +1479,9 @@ async def test_create_contact_no_name():
     from mcp_lexoffice.server import create_contact
 
     ctx = make_ctx({})
-    result = await create_contact(ctx)
-    parsed = as_dict(result)
-    assert "error" in parsed
+    with pytest.raises(ToolError) as exc:
+        await create_contact(ctx)
+    assert "company_name" in str(exc.value)
 
 
 async def test_create_contact_with_email():
@@ -1786,11 +1785,11 @@ async def test_pursue_quotation_blocks_draft():
     from mcp_lexoffice.server import pursue_quotation_to_invoice
 
     ctx = make_ctx({"get_quotation": {"id": "q-1", "voucherStatus": "draft"}})
-    result = await pursue_quotation_to_invoice(ctx, quotation_id="q-1")
-    parsed = as_dict(result)
-    assert "error" in parsed
-    assert "draft" in parsed["error"].lower()
-    assert "/edit/" in parsed["deepLink"]
+    with pytest.raises(ToolError) as exc:
+        await pursue_quotation_to_invoice(ctx, quotation_id="q-1")
+    msg = str(exc.value)
+    assert "draft" in msg.lower()
+    assert "/edit/" in msg
 
 
 async def test_pursue_quotation_finalized():
@@ -2130,7 +2129,10 @@ async def test_simple_tools_return_valid_json(tool_name):
         "list_payment_conditions": "list_payment_conditions",
         "list_countries": "list_countries",
     }
-    ctx = make_ctx({method_map[tool_name]: {"data": "test"}})
+    # The bare-array tools return a list[Model] over a list payload; the object tools take a dict.
+    list_returning = {"list_payment_conditions", "list_countries"}
+    payload = [{"id": "x"}] if tool_name in list_returning else {"data": "test"}
+    ctx = make_ctx({method_map[tool_name]: payload})
     result = await tool_fn(ctx)
     as_dict(result)  # should not raise
 
@@ -2379,10 +2381,136 @@ async def test_typed_output_schema_coverage():
         "create_and_send_invoice", "find_or_create_contact", "convert_quotation_and_send",
         "list_quotations", "get_contact_invoices", "create_credit_note", "get_invoice_pdf",
         "render_dunning_pdf", "send_invoice", "delete_draft_invoice",
+        # pass-3: the four bare-array tools now advertise a typed list[Model] schema (additive).
+        "list_countries", "list_posting_categories", "list_payment_conditions",
+        "list_recurring_templates",
     ]
     for name in typed:
         assert tools[name].output_schema is not None, f"{name} lost its output schema"
     assert len(typed) >= 35
+
+
+async def test_get_payment_status_stays_str_polymorphic():
+    """get_payment_status is intentionally NOT typed: its payload is object-XOR-array by branch
+    (single payments object by invoice_id vs. an array of summaries by contact_name), which no
+    single typed return can represent without changing one branch's wire shape."""
+    tools = {t.name: t for t in await mcp.list_tools()}
+    schema = tools["get_payment_status"].output_schema
+    # fastmcp wraps a bare str return under {"result": {"type": "string"}}.
+    assert schema["properties"]["result"]["type"] == "string"
+
+
+@pytest.mark.parametrize("tool_name,method,payload,inject_deeplink", [
+    ("list_countries", "list_countries",
+     [{"countryCode": "DE", "taxClassification": "de", "futureKey": 1},
+      {"countryCode": "AT", "taxClassification": "intraCommunity"}], False),
+    ("list_posting_categories", "list_posting_categories",
+     [{"id": "out-1", "name": "Lizenzen", "type": "outgo", "contactRequired": False,
+       "splitAllowed": True, "groupName": "Aufwand", "newKey": "x"},
+      {"id": "inc-1", "name": "Erlöse", "type": "income"}], False),
+    ("list_payment_conditions", "list_payment_conditions",
+     [{"id": "pc-1", "paymentTermLabel": "14 Tage", "paymentTermDuration": 14,
+       "organizationDefault": True},
+      {"id": "pc-2", "paymentTermDuration": 0}], False),
+    ("list_recurring_templates", "list_recurring_templates",
+     [{"id": "rt-1", "organizationId": "org", "title": "Hosting",
+       "recurringTemplateSettings": {"frequency": "MONTHLY"}, "extraField": 9}], True),
+])
+async def test_array_tool_text_content_backward_compatible(tool_name, method, payload, inject_deeplink):
+    """END-TO-END via an in-memory fastmcp Client: the four newly-typed array tools must keep
+    their unstructured TEXT content an equivalent JSON ARRAY (rule 2) and add structured_content
+    purely additively. Compares against the exact ``json.dumps`` text the tool produced before."""
+    from unittest.mock import AsyncMock
+    import mcp_lexoffice.server as srv
+    from mcp_lexoffice.config import get_settings
+    from fastmcp import Client
+
+    fake = AsyncMock()
+    getattr(fake, method).return_value = [dict(x) for x in payload]
+    saved = srv._client
+    srv._client = lambda ctx: fake
+    # The in-memory Client runs the server lifespan, which builds a real LexofficeClient and
+    # requires LEXOFFICE_API_KEY. Provide a dummy key + clear the cached Settings so this test is
+    # self-contained (not order-dependent on another test having set the env var).
+    get_settings.cache_clear()
+    try:
+        with patch.dict(os.environ, {"LEXOFFICE_API_KEY": "test-key-array"}):
+            async with Client(srv.mcp) as c:
+                res = await c.call_tool(tool_name, {})
+    finally:
+        srv._client = saved
+        get_settings.cache_clear()
+
+    # Reconstruct the OLD wire text the str tool would have produced.
+    expected = [dict(x) for x in payload]
+    if inject_deeplink:
+        for x in expected:
+            x["deepLink"] = f"https://app.lexoffice.de/#/permalink/recurring-templates/view/{x['id']}"
+    old_text = json.dumps(expected, indent=2, ensure_ascii=False, default=str)
+
+    new_text = res.content[0].text
+    # Text content is the SAME JSON array (whitespace may differ; structure/values identical).
+    assert json.loads(new_text) == json.loads(old_text)
+    # No injected error:null / null-valued declared keys leaked into any row.
+    for row in json.loads(new_text):
+        assert "error" not in row
+    # structured_content is additive: the typed array under the wrap key.
+    assert res.structured_content["result"] == json.loads(old_text)
+
+
+@pytest.mark.parametrize("tool_name,kwargs,ctx_responses,needle", [
+    ("send_invoice", {"invoice_id": "i", "recipient_email": "x@y.de"},
+     {"get_invoice": {"id": "i", "voucherStatus": "draft"}}, "draft"),
+    ("delete_draft_invoice", {"invoice_id": "i"},
+     {"get_invoice": {"id": "i", "voucherStatus": "open"}}, "Only drafts"),
+    ("create_contact", {}, {}, "company_name"),
+    ("get_payment_status", {}, {}, "invoice_id"),
+    ("pursue_quotation_to_invoice", {"quotation_id": "q"},
+     {"get_quotation": {"id": "q", "voucherStatus": "draft"}}, "draft"),
+    ("convert_quotation_and_send", {"quotation_id": "q", "recipient_email": "x@y.de"},
+     {"get_quotation": {"id": "q", "voucherStatus": "draft"}}, "draft"),
+    ("attach_voucher_file", {"voucher_id": "v", "file_content": "abc", "file_name": "x.txt"},
+     {}, "Unsupported"),
+])
+async def test_guardrail_paths_raise_tool_error(tool_name, kwargs, ctx_responses, needle):
+    """Every former 200-{"error": ...} success envelope now raises ToolError (task A) so clients
+    can tell a guardrail failure from a result. One parametrized contract over the converted
+    short-circuits."""
+    import mcp_lexoffice.server as srv
+
+    tool_fn = getattr(srv, tool_name)
+    ctx = make_ctx(ctx_responses)
+    with pytest.raises(ToolError) as exc:
+        await tool_fn(ctx, **kwargs)
+    assert needle.lower() in str(exc.value).lower()
+
+
+async def test_get_contact_invoices_guardrails_raise():
+    """get_contact_invoices guardrails (no args / no match / multiple matches) raise ToolError."""
+    from mcp_lexoffice.server import get_contact_invoices
+
+    # No args.
+    with pytest.raises(ToolError) as e1:
+        await get_contact_invoices(make_ctx({}))
+    assert "contact_id" in str(e1.value)
+
+    # No match.
+    ctx_none = make_ctx({"filter_contacts": {"content": []}})
+    with pytest.raises(ToolError) as e2:
+        await get_contact_invoices(ctx_none, contact_name="Nobody")
+    assert "No contact" in str(e2.value)
+
+    # Multiple matches — error names the candidates so the caller can pick a contact_id.
+    ctx_multi = make_ctx({"filter_contacts": {"content": [
+        {"id": "c-1", "company": {"name": "Acme GmbH"}},
+        {"id": "c-2", "person": {"firstName": "Jane", "lastName": "Acme"}},
+    ]}})
+    with pytest.raises(ToolError) as e3:
+        await get_contact_invoices(ctx_multi, contact_name="Acme")
+    msg = str(e3.value)
+    assert "Multiple contacts" in msg
+    assert "c-1" in msg and "Acme GmbH" in msg
+    assert "c-2" in msg and "Jane Acme" in msg
 
 
 @pytest.mark.parametrize("model_name", [
@@ -2401,6 +2529,29 @@ def test_models_validate_error_payload(model_name):
     dumped = inst.model_dump(by_alias=True)
     assert dumped["error"] == "boom"
     assert dumped["deepLink"] == "https://app.lexoffice.de/x"
+
+
+@pytest.mark.parametrize("model_name", [
+    "Country", "PostingCategory", "PaymentCondition", "RecurringTemplateSummary",
+])
+def test_list_item_models_validate_error_payload(model_name):
+    """The pass-3 array-element models also validate the {'error': ...} payload (rule 3), so a
+    structured output_schema derived from list[Model] never explodes on an error row. Their
+    None-dropping serializer means a non-error row never gains a stray ``error: null`` key."""
+    import mcp_lexoffice.server as srv
+
+    model = getattr(srv, model_name)
+    # Error payload validates and round-trips the error string.
+    err = model.model_validate({"error": "boom"})
+    assert err.model_dump(by_alias=True)["error"] == "boom"
+    # A normal row does NOT carry error:null (None-dropping serializer) — preserving the bare
+    # array element shape clients depend on.
+    row = model.model_validate({"id": "x"} if model_name != "Country" else {"countryCode": "DE"})
+    dumped = row.model_dump(by_alias=True)
+    assert "error" not in dumped
+    # extra="allow" carries a forward-compat unknown key verbatim.
+    fwd = model.model_validate({"someFutureKey": 1})
+    assert fwd.model_dump(by_alias=True)["someFutureKey"] == 1
 
 
 def test_invoice_model_preserves_camelcase_top_level_keys():
@@ -2457,13 +2608,15 @@ def test_create_voucher_result_keeps_enrichment_block():
     assert dumped["contactId"] == "vendor-1"
 
 
-async def test_typed_tool_error_path_round_trips_through_handler():
-    """A tool that short-circuits with an error returns a model whose structured content
-    still carries the error key (end-to-end, not just the bare model)."""
+async def test_typed_tool_error_path_raises_tool_error():
+    """A tool that short-circuits on a guardrail now raises ToolError (unified error signal),
+    so clients can distinguish a real failure from a successful result — instead of receiving
+    a 200 {"error": ...} success envelope."""
     from mcp_lexoffice.server import send_invoice
 
     ctx = make_ctx({"get_invoice": {"id": "inv-1", "voucherStatus": "draft"}})
-    result = await send_invoice(ctx, invoice_id="inv-1", recipient_email="x@y.de")
-    parsed = as_dict(result)
-    assert "draft" in parsed["error"].lower()
-    assert "/edit/" in parsed["deepLink"]
+    with pytest.raises(ToolError) as exc:
+        await send_invoice(ctx, invoice_id="inv-1", recipient_email="x@y.de")
+    msg = str(exc.value)
+    assert "draft" in msg.lower()
+    assert "/edit/" in msg

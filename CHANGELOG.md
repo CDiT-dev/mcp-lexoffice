@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.3.12] - 2026-06-10
+
+- feat(lexoffice): tags + financial-overview pagination + contact-invoices resource template (shelf) (#18)
+
+
 ## [0.3.11] - 2026-06-10
 
 - feat(lexoffice): unify ToolError + type remaining returns (pass 3) (#17)

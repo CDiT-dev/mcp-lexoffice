@@ -10,7 +10,8 @@ from typing import Annotated, Any, Literal
 
 import httpx
 from fastmcp import FastMCP, Context
-from mcp.types import Icon
+from mcp.types import Icon, ToolAnnotations
+from pydantic import BaseModel, Field
 
 from .client import LexofficeClient
 
@@ -67,15 +68,38 @@ if _settings.mcp_transport in ("http", "streamable-http") and not _api_key:
     )
 _auth = BearerTokenVerifier(api_key=_api_key) if _api_key else None
 
+SERVER_INSTRUCTIONS = (
+    "MCP server for Lexware Office (Lexoffice) — German invoicing, contacts, quotations, "
+    "vouchers (Belege), and accounting via the official REST API.\n\n"
+    "Tax regime is auto-detected from the Lexoffice profile (vatfree = Kleinunternehmer 0%, "
+    "net = 19%, gross = 19%). Default payment terms: Zahlbar sofort, rein netto.\n\n"
+    "Choosing a tool:\n"
+    "- One-shot billing ('send an invoice to X for Y'): create_and_send_invoice. For drafts "
+    "that need review first: create_draft_invoice, then finalize_invoice + send_invoice.\n"
+    "- Quotations (Angebote): create_draft_quotation -> finalize_quotation -> "
+    "pursue_quotation_to_invoice, or convert_quotation_and_send in one step.\n"
+    "- Listing: list_invoices (sales), list_expenses (purchases), list_quotations; "
+    "list_vouchers only for other types (creditnote, orderconfirmation, ...).\n"
+    "- Receipt capture (Belegfänger): find_or_create_contact -> create_voucher (structured, "
+    "amount + vendor + optional PDF attach). Use upload_voucher only to drop a raw file in "
+    "Beleg-Eingang without structuring it.\n"
+    "- Contacts: find_or_create_contact for idempotent resolve-or-create; search_contacts to "
+    "browse; create_contact/update_contact for explicit CRUD. For accounting/invoice contacts "
+    "use this server; for CRM/chat contacts use watermelon.\n"
+    "- Money owed: get_payment_status, get_contact_invoices, create_dunning (Mahnung) for "
+    "overdue invoices.\n\n"
+    "Irreversible actions (finalize_invoice, finalize_quotation, send_invoice, "
+    "create_and_send_invoice, convert_quotation_and_send) assign numbers / email customers and "
+    "cannot be undone — confirm intent before calling. Reference data is also exposed as "
+    "resources under the lexoffice:// scheme (countries, posting-categories, payment-conditions, "
+    "service-catalog, status).\n\n"
+    "Service catalog: Digitale Sprechstunde (EUR 995 Pauschal), Consulting (EUR 150/Stunde), "
+    "Platform Development (EUR 1200/Tag)."
+)
+
 mcp = FastMCP(
     "Lexware Office",
-    instructions=(
-        "MCP server for Lexware Office (Lexoffice) — invoices, contacts, quotations, "
-        "and accounting. Tax regime is auto-detected from the Lexoffice profile "
-        "(vatfree, net, or gross). Default payment terms: Zahlbar sofort, rein netto. "
-        "Service catalog: Digitale Sprechstunde (EUR 995 Pauschal), Consulting "
-        "(EUR 150/Stunde), Platform Development (EUR 1200/Tag)."
-    ),
+    instructions=SERVER_INSTRUCTIONS,
     icons=[
         Icon(
             src="https://www.lexware.de/favicon.ico",
@@ -93,6 +117,36 @@ def _fmt(data: Any) -> str:
 
 def _client(ctx: Context) -> LexofficeClient:
     return ctx.lifespan_context["lexoffice"]
+
+
+# ── Structured output models ─────────────────────────────────────────
+# These give fastmcp an output_schema for the highest-value composite/aggregate
+# tools so clients receive machine-validated structured content alongside the
+# human-readable JSON. Top-level field names mirror the previous dict payloads.
+
+
+class MonthlyFinancials(BaseModel):
+    """Revenue, expenses, and net for a single calendar month."""
+
+    month: str = Field(description="Calendar month, YYYY-MM")
+    revenue: float = Field(description="Settled (paidoff) sales total for the month, EUR")
+    expenses: float = Field(description="Settled (paidoff) purchase total for the month, EUR")
+    net: float = Field(description="revenue - expenses, EUR")
+
+
+class FinancialOverview(BaseModel):
+    """Aggregated monthly revenue/expense/net overview plus open-invoice counts."""
+
+    monthly: list[MonthlyFinancials] = Field(
+        description="Per-month figures, newest first, capped to the requested window"
+    )
+    open_invoices: int = Field(description="Count of open (unpaid, finalized) sales invoices")
+    overdue_invoices: int = Field(description="Subset of open_invoices whose dueDate has passed")
+    truncated: bool = Field(
+        default=False,
+        description="True if any underlying voucher page hit the 250-row cap and figures "
+        "may exclude older settled invoices",
+    )
 
 
 DEFAULT_TAX_RATE = {"vatfree": 0, "net": 19, "gross": 19}
@@ -214,7 +268,15 @@ def _build_address(
 # ── Profile ──────────────────────────────────────────────────────────
 
 
-@mcp.tool
+@mcp.tool(
+    tags={"finance", "profile", "read"},
+    annotations=ToolAnnotations(
+        title="Get organization profile",
+        readOnlyHint=True,
+        idempotentHint=True,
+        openWorldHint=True,
+    ),
+)
 async def get_profile(ctx: Context) -> str:
     """[finance] Get the Lexware Office organization profile — company name, tax settings, currency."""
     result = await _client(ctx).get_profile()
@@ -224,7 +286,16 @@ async def get_profile(ctx: Context) -> str:
 # ── Invoices ─────────────────────────────────────────────────────────
 
 
-@mcp.tool
+@mcp.tool(
+    tags={"finance", "invoice", "write"},
+    annotations=ToolAnnotations(
+        title="Create draft invoice",
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+        openWorldHint=True,
+    ),
+)
 async def create_draft_invoice(
     ctx: Context,
     recipient_name: Annotated[str, "Company or person name for the invoice recipient"],
@@ -278,7 +349,16 @@ async def create_draft_invoice(
     return _fmt(result)
 
 
-@mcp.tool
+@mcp.tool(
+    tags={"finance", "invoice", "write", "irreversible"},
+    annotations=ToolAnnotations(
+        title="Finalize invoice (irreversible)",
+        readOnlyHint=False,
+        destructiveHint=True,
+        idempotentHint=False,
+        openWorldHint=True,
+    ),
+)
 async def finalize_invoice(
     ctx: Context,
     invoice_id: Annotated[str, "UUID of the draft invoice to finalize"],
@@ -291,7 +371,16 @@ async def finalize_invoice(
     return _fmt(result)
 
 
-@mcp.tool
+@mcp.tool(
+    tags={"finance", "invoice", "delete", "irreversible"},
+    annotations=ToolAnnotations(
+        title="Delete draft invoice",
+        readOnlyHint=False,
+        destructiveHint=True,
+        idempotentHint=True,
+        openWorldHint=True,
+    ),
+)
 async def delete_draft_invoice(
     ctx: Context,
     invoice_id: Annotated[str, "UUID of the draft invoice to delete"],
@@ -306,7 +395,16 @@ async def delete_draft_invoice(
     return _fmt({"status": "deleted", "invoice_id": invoice_id})
 
 
-@mcp.tool
+@mcp.tool(
+    tags={"finance", "invoice", "send", "irreversible"},
+    annotations=ToolAnnotations(
+        title="Send invoice by email",
+        readOnlyHint=False,
+        destructiveHint=True,
+        idempotentHint=False,
+        openWorldHint=True,
+    ),
+)
 async def send_invoice(
     ctx: Context,
     invoice_id: Annotated[str, "UUID of the finalized invoice"],
@@ -322,7 +420,15 @@ async def send_invoice(
     return _fmt({"status": "sent", "invoice_id": invoice_id, "recipient": recipient_email})
 
 
-@mcp.tool
+@mcp.tool(
+    tags={"finance", "invoice", "read"},
+    annotations=ToolAnnotations(
+        title="Get invoice",
+        readOnlyHint=True,
+        idempotentHint=True,
+        openWorldHint=True,
+    ),
+)
 async def get_invoice(
     ctx: Context,
     invoice_id: Annotated[str, "UUID of the invoice or voucher (IDs from list_invoices work here)"],
@@ -343,7 +449,15 @@ async def get_invoice(
     return _fmt(result)
 
 
-@mcp.tool
+@mcp.tool(
+    tags={"finance", "invoice", "read", "document"},
+    annotations=ToolAnnotations(
+        title="Render invoice PDF",
+        readOnlyHint=True,
+        idempotentHint=True,
+        openWorldHint=True,
+    ),
+)
 async def get_invoice_pdf(
     ctx: Context,
     invoice_id: Annotated[str, "UUID of the finalized invoice"],
@@ -353,7 +467,15 @@ async def get_invoice_pdf(
     return _fmt(result)
 
 
-@mcp.tool
+@mcp.tool(
+    tags={"finance", "invoice", "list", "read"},
+    annotations=ToolAnnotations(
+        title="List sales invoices",
+        readOnlyHint=True,
+        idempotentHint=True,
+        openWorldHint=True,
+    ),
+)
 async def list_invoices(
     ctx: Context,
     status: Annotated[
@@ -391,7 +513,16 @@ async def list_invoices(
 # ── Voucher Upload ───────────────────────────────────────────────────
 
 
-@mcp.tool
+@mcp.tool(
+    tags={"finance", "voucher", "upload", "write"},
+    annotations=ToolAnnotations(
+        title="Upload raw voucher file",
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+        openWorldHint=True,
+    ),
+)
 async def upload_voucher(
     ctx: Context,
     file_content: Annotated[str, "Base64-encoded file content"],
@@ -415,7 +546,15 @@ async def upload_voucher(
 # ── Financial Queries ────────────────────────────────────────────────
 
 
-@mcp.tool
+@mcp.tool(
+    tags={"finance", "expense", "list", "read"},
+    annotations=ToolAnnotations(
+        title="List expenses",
+        readOnlyHint=True,
+        idempotentHint=True,
+        openWorldHint=True,
+    ),
+)
 async def list_expenses(
     ctx: Context,
     status: Annotated[str | None, "Filter: draft, open, paid, paidoff, voided, overdue, unchecked (comma-separated)"] = None,
@@ -431,18 +570,39 @@ async def list_expenses(
     return _fmt(result)
 
 
-@mcp.tool
+@mcp.tool(
+    tags={"finance", "report", "read"},
+    annotations=ToolAnnotations(
+        title="Financial overview (monthly)",
+        readOnlyHint=True,
+        idempotentHint=True,
+        openWorldHint=True,
+    ),
+)
 async def get_financial_overview(
     ctx: Context,
     months: Annotated[int, "Number of months to include (1-12, default 6)"] = 6,
-) -> str:
+) -> FinancialOverview:
     """[finance] Get a monthly revenue/expense/net overview. Queries sales and purchase invoices.
 
-    months defaults to 6, maximum 12. Large ranges may be slow as it queries all settled invoices."""
+    months defaults to 6, maximum 12. Large ranges may be slow as it queries all settled invoices.
+    Each underlying voucher query is capped at 250 rows; if any page hits that cap, the result's
+    `truncated` flag is set and older settled invoices may be excluded from the figures."""
     months = max(1, min(12, months))
-    sales = await _client(ctx).filter_vouchers("salesinvoice,invoice", voucher_status="paidoff", size=250)
-    purchases = await _client(ctx).filter_vouchers("purchaseinvoice", voucher_status="paidoff", size=250)
-    open_invoices = await _client(ctx).filter_vouchers("salesinvoice,invoice", voucher_status="open", size=250)
+    await ctx.info(f"Aggregating financial overview for the last {months} month(s)")
+    page_size = 250
+    sales = await _client(ctx).filter_vouchers("salesinvoice,invoice", voucher_status="paidoff", size=page_size)
+    await ctx.report_progress(1, 3)
+    purchases = await _client(ctx).filter_vouchers("purchaseinvoice", voucher_status="paidoff", size=page_size)
+    await ctx.report_progress(2, 3)
+    open_invoices = await _client(ctx).filter_vouchers("salesinvoice,invoice", voucher_status="open", size=page_size)
+    await ctx.report_progress(3, 3)
+
+    # If any query returned a full page, the account has more settled vouchers than we fetched.
+    truncated = any(
+        len(page.get("content", [])) >= page_size
+        for page in (sales, purchases, open_invoices)
+    )
 
     today = date.today()
     monthly: dict[str, dict[str, float]] = {}
@@ -462,12 +622,12 @@ async def get_financial_overview(
     overview = []
     for month_key in sorted(monthly.keys(), reverse=True)[:months]:
         data = monthly[month_key]
-        overview.append({
-            "month": month_key,
-            "revenue": round(data["revenue"], 2),
-            "expenses": round(data["expenses"], 2),
-            "net": round(data["revenue"] - data["expenses"], 2),
-        })
+        overview.append(MonthlyFinancials(
+            month=month_key,
+            revenue=round(data["revenue"], 2),
+            expenses=round(data["expenses"], 2),
+            net=round(data["revenue"] - data["expenses"], 2),
+        ))
 
     open_count = len(open_invoices.get("content", []))
     overdue_count = sum(
@@ -475,14 +635,23 @@ async def get_financial_overview(
         if inv.get("dueDate") and date.fromisoformat(inv["dueDate"][:10]) < today
     )
 
-    return _fmt({
-        "monthly": overview,
-        "open_invoices": open_count,
-        "overdue_invoices": overdue_count,
-    })
+    return FinancialOverview(
+        monthly=overview,
+        open_invoices=open_count,
+        overdue_invoices=overdue_count,
+        truncated=truncated,
+    )
 
 
-@mcp.tool
+@mcp.tool(
+    tags={"finance", "payment", "read"},
+    annotations=ToolAnnotations(
+        title="Get payment status",
+        readOnlyHint=True,
+        idempotentHint=True,
+        openWorldHint=True,
+    ),
+)
 async def get_payment_status(
     ctx: Context,
     invoice_id: Annotated[str | None, "UUID of a specific invoice"] = None,
@@ -523,7 +692,15 @@ async def get_payment_status(
 # ── Contacts ─────────────────────────────────────────────────────────
 
 
-@mcp.tool
+@mcp.tool(
+    tags={"finance", "contact", "search", "read"},
+    annotations=ToolAnnotations(
+        title="Search contacts",
+        readOnlyHint=True,
+        idempotentHint=True,
+        openWorldHint=True,
+    ),
+)
 async def search_contacts(
     ctx: Context,
     name: Annotated[str | None, "Filter by name (min 3 chars)"] = None,
@@ -549,7 +726,15 @@ async def search_contacts(
     return _fmt(result)
 
 
-@mcp.tool
+@mcp.tool(
+    tags={"finance", "contact", "read"},
+    annotations=ToolAnnotations(
+        title="Get contact",
+        readOnlyHint=True,
+        idempotentHint=True,
+        openWorldHint=True,
+    ),
+)
 async def get_contact(
     ctx: Context,
     contact_id: Annotated[str, "UUID of the contact"],
@@ -560,7 +745,16 @@ async def get_contact(
     return _fmt(result)
 
 
-@mcp.tool
+@mcp.tool(
+    tags={"finance", "contact", "write"},
+    annotations=ToolAnnotations(
+        title="Create contact",
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+        openWorldHint=True,
+    ),
+)
 async def create_contact(
     ctx: Context,
     company_name: Annotated[str | None, "Company name (use this OR person fields)"] = None,
@@ -608,7 +802,16 @@ async def create_contact(
     return _fmt(result)
 
 
-@mcp.tool
+@mcp.tool(
+    tags={"finance", "contact", "write"},
+    annotations=ToolAnnotations(
+        title="Update contact",
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=True,
+    ),
+)
 async def update_contact(
     ctx: Context,
     contact_id: Annotated[str, "UUID of the contact"],
@@ -637,7 +840,16 @@ async def update_contact(
 # ── Quotations ───────────────────────────────────────────────────────
 
 
-@mcp.tool
+@mcp.tool(
+    tags={"finance", "quotation", "write"},
+    annotations=ToolAnnotations(
+        title="Create draft quotation",
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+        openWorldHint=True,
+    ),
+)
 async def create_draft_quotation(
     ctx: Context,
     recipient_name: Annotated[str, "Company or person name"],
@@ -683,7 +895,16 @@ async def create_draft_quotation(
     return _fmt(result)
 
 
-@mcp.tool
+@mcp.tool(
+    tags={"finance", "quotation", "write", "irreversible"},
+    annotations=ToolAnnotations(
+        title="Finalize quotation (irreversible)",
+        readOnlyHint=False,
+        destructiveHint=True,
+        idempotentHint=False,
+        openWorldHint=True,
+    ),
+)
 async def finalize_quotation(
     ctx: Context,
     quotation_id: Annotated[str, "UUID of the draft quotation"],
@@ -695,7 +916,16 @@ async def finalize_quotation(
     return _fmt(result)
 
 
-@mcp.tool
+@mcp.tool(
+    tags={"finance", "quotation", "invoice", "write"},
+    annotations=ToolAnnotations(
+        title="Pursue quotation to draft invoice",
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+        openWorldHint=True,
+    ),
+)
 async def pursue_quotation_to_invoice(
     ctx: Context,
     quotation_id: Annotated[str, "UUID of the finalized quotation"],
@@ -716,7 +946,16 @@ async def pursue_quotation_to_invoice(
 # ── Dunnings ─────────────────────────────────────────────────────────
 
 
-@mcp.tool
+@mcp.tool(
+    tags={"finance", "dunning", "write"},
+    annotations=ToolAnnotations(
+        title="Create dunning (Mahnung)",
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+        openWorldHint=True,
+    ),
+)
 async def create_dunning(
     ctx: Context,
     invoice_id: Annotated[str, "UUID of the overdue invoice"],
@@ -732,7 +971,15 @@ async def create_dunning(
     return _fmt(result)
 
 
-@mcp.tool
+@mcp.tool(
+    tags={"finance", "dunning", "read", "document"},
+    annotations=ToolAnnotations(
+        title="Render dunning PDF",
+        readOnlyHint=True,
+        idempotentHint=True,
+        openWorldHint=True,
+    ),
+)
 async def render_dunning_pdf(
     ctx: Context,
     dunning_id: Annotated[str, "UUID of the dunning"],
@@ -745,7 +992,15 @@ async def render_dunning_pdf(
 # ── Articles ─────────────────────────────────────────────────────────
 
 
-@mcp.tool
+@mcp.tool(
+    tags={"finance", "article", "list", "read"},
+    annotations=ToolAnnotations(
+        title="List articles",
+        readOnlyHint=True,
+        idempotentHint=True,
+        openWorldHint=True,
+    ),
+)
 async def list_articles(
     ctx: Context,
     page: Annotated[int, "Page number (0-indexed)"] = 0,
@@ -756,7 +1011,16 @@ async def list_articles(
     return _fmt(result)
 
 
-@mcp.tool
+@mcp.tool(
+    tags={"finance", "article", "write"},
+    annotations=ToolAnnotations(
+        title="Create article",
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+        openWorldHint=True,
+    ),
+)
 async def create_article(
     ctx: Context,
     name: Annotated[str, "Article name (e.g. 'Digitale Sprechstunde')"],
@@ -785,7 +1049,15 @@ async def create_article(
     return _fmt(result)
 
 
-@mcp.tool
+@mcp.tool(
+    tags={"finance", "article", "read"},
+    annotations=ToolAnnotations(
+        title="Get article",
+        readOnlyHint=True,
+        idempotentHint=True,
+        openWorldHint=True,
+    ),
+)
 async def get_article(
     ctx: Context,
     article_id: Annotated[str, "UUID of the article"],
@@ -795,7 +1067,16 @@ async def get_article(
     return _fmt(result)
 
 
-@mcp.tool
+@mcp.tool(
+    tags={"finance", "article", "write"},
+    annotations=ToolAnnotations(
+        title="Update article",
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=True,
+    ),
+)
 async def update_article(
     ctx: Context,
     article_id: Annotated[str, "UUID of the article"],
@@ -821,7 +1102,15 @@ async def update_article(
 # ── Voucher List (generic) ──────────────────────────────────────────
 
 
-@mcp.tool
+@mcp.tool(
+    tags={"finance", "voucher", "list", "read"},
+    annotations=ToolAnnotations(
+        title="List vouchers (generic)",
+        readOnlyHint=True,
+        idempotentHint=True,
+        openWorldHint=True,
+    ),
+)
 async def list_vouchers(
     ctx: Context,
     voucher_type: Annotated[
@@ -848,7 +1137,15 @@ async def list_vouchers(
     return _fmt(result)
 
 
-@mcp.tool
+@mcp.tool(
+    tags={"finance", "voucher", "read"},
+    annotations=ToolAnnotations(
+        title="Get voucher",
+        readOnlyHint=True,
+        idempotentHint=True,
+        openWorldHint=True,
+    ),
+)
 async def get_voucher(
     ctx: Context,
     voucher_id: Annotated[str, "UUID of the voucher"],
@@ -862,7 +1159,16 @@ async def get_voucher(
     return _fmt(result)
 
 
-@mcp.tool
+@mcp.tool(
+    tags={"finance", "voucher", "write"},
+    annotations=ToolAnnotations(
+        title="Update voucher line items",
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=True,
+    ),
+)
 async def update_voucher(
     ctx: Context,
     voucher_id: Annotated[str, "UUID of the voucher"],
@@ -883,7 +1189,15 @@ async def update_voucher(
 # ── Structured Voucher Creation (Belegfänger enrichment) ─────────────
 
 
-@mcp.tool
+@mcp.tool(
+    tags={"finance", "voucher", "reference", "read"},
+    annotations=ToolAnnotations(
+        title="List posting categories",
+        readOnlyHint=True,
+        idempotentHint=True,
+        openWorldHint=True,
+    ),
+)
 async def list_posting_categories(
     ctx: Context,
     category_type: Annotated[
@@ -902,7 +1216,16 @@ async def list_posting_categories(
     return _fmt(categories)
 
 
-@mcp.tool
+@mcp.tool(
+    tags={"finance", "voucher", "write", "belegfaenger"},
+    annotations=ToolAnnotations(
+        title="Create structured purchase voucher",
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+        openWorldHint=True,
+    ),
+)
 async def create_voucher(
     ctx: Context,
     total_amount: Annotated[float, "Total invoice amount. Interpreted per tax_type: a GROSS total (tax included) when tax_type='gross' (default), a NET total when tax_type='net'."],
@@ -995,6 +1318,7 @@ async def create_voucher(
         data["contactName"] = contact_name
 
     tax_rate_adjusted = False
+    await ctx.info(f"Creating purchase voucher (gross {total_gross} {tax_type}, {rate}% VAT)")
     try:
         created = await _client(ctx).create_voucher(data)
     except httpx.HTTPStatusError as exc:
@@ -1003,6 +1327,9 @@ async def create_voucher(
         # voucher still lands with the gross amount + vendor for bank-matching. The user
         # corrects the VAT in 'Zu prüfen'.
         if rate and _is_taxrate_rejection(exc):
+            await ctx.warning(
+                f"Posting category rejected {rate}% VAT — re-booking at 0% so the voucher persists"
+            )
             rate = 0
             item = data["voucherItems"][0]
             item["taxAmount"] = 0.0
@@ -1027,9 +1354,11 @@ async def create_voucher(
             if len(file_bytes) > 5 * 1024 * 1024:
                 attachment_error = "File exceeds 5MB Lexoffice upload limit"
             else:
+                await ctx.info(f"Attaching receipt file {file_name} to voucher {voucher_id}")
                 await _client(ctx).attach_voucher_file(voucher_id, file_bytes, file_name)
 
     # Read back to confirm enrichment persisted (the failure mode CDI-1164 was opened for).
+    await ctx.info("Reading voucher back to confirm enrichment persisted")
     persisted = await _client(ctx).get_voucher(voucher_id) if voucher_id else created
     result: dict[str, Any] = {
         "id": voucher_id,
@@ -1062,7 +1391,16 @@ async def create_voucher(
     return _fmt(result)
 
 
-@mcp.tool
+@mcp.tool(
+    tags={"finance", "voucher", "write", "file"},
+    annotations=ToolAnnotations(
+        title="Attach file to voucher",
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+        openWorldHint=True,
+    ),
+)
 async def attach_voucher_file(
     ctx: Context,
     voucher_id: Annotated[str, "UUID of the voucher to attach the file to"],
@@ -1089,7 +1427,15 @@ async def attach_voucher_file(
 # ── Payment Conditions ───────────────────────────────────────────────
 
 
-@mcp.tool
+@mcp.tool(
+    tags={"finance", "reference", "read"},
+    annotations=ToolAnnotations(
+        title="List payment conditions",
+        readOnlyHint=True,
+        idempotentHint=True,
+        openWorldHint=True,
+    ),
+)
 async def list_payment_conditions(ctx: Context) -> str:
     """[finance] List all configured payment conditions (Zahlungsbedingungen)."""
     result = await _client(ctx).list_payment_conditions()
@@ -1099,7 +1445,15 @@ async def list_payment_conditions(ctx: Context) -> str:
 # ── Utilities ────────────────────────────────────────────────────────
 
 
-@mcp.tool
+@mcp.tool(
+    tags={"finance", "reference", "read"},
+    annotations=ToolAnnotations(
+        title="List countries",
+        readOnlyHint=True,
+        idempotentHint=True,
+        openWorldHint=True,
+    ),
+)
 async def list_countries(ctx: Context) -> str:
     """[finance] List all countries with their tax classification (DE, intraCommunity, thirdPartyCountry)."""
     result = await _client(ctx).list_countries()
@@ -1109,7 +1463,15 @@ async def list_countries(ctx: Context) -> str:
 # ── Recurring Templates ────────────────────────────────────────────
 
 
-@mcp.tool
+@mcp.tool(
+    tags={"finance", "recurring", "list", "read"},
+    annotations=ToolAnnotations(
+        title="List recurring templates",
+        readOnlyHint=True,
+        idempotentHint=True,
+        openWorldHint=True,
+    ),
+)
 async def list_recurring_templates(ctx: Context) -> str:
     """[finance] List all recurring invoice templates (Abo-Rechnungen).
 
@@ -1123,7 +1485,15 @@ async def list_recurring_templates(ctx: Context) -> str:
     return _fmt(result)
 
 
-@mcp.tool
+@mcp.tool(
+    tags={"finance", "recurring", "read"},
+    annotations=ToolAnnotations(
+        title="Get recurring template",
+        readOnlyHint=True,
+        idempotentHint=True,
+        openWorldHint=True,
+    ),
+)
 async def get_recurring_template(
     ctx: Context,
     template_id: Annotated[str, "UUID of the recurring template"],
@@ -1137,7 +1507,16 @@ async def get_recurring_template(
 # ── Capability Tools (composite workflows) ─────────────────────────
 
 
-@mcp.tool
+@mcp.tool(
+    tags={"finance", "invoice", "composite", "send", "irreversible"},
+    annotations=ToolAnnotations(
+        title="Create, finalize & send invoice (irreversible)",
+        readOnlyHint=False,
+        destructiveHint=True,
+        idempotentHint=False,
+        openWorldHint=True,
+    ),
+)
 async def create_and_send_invoice(
     ctx: Context,
     recipient_name: Annotated[str, "Company or person name for the invoice recipient"],
@@ -1185,10 +1564,16 @@ async def create_and_send_invoice(
             "paymentTermDuration": payment_term_duration,
         }
 
+    await ctx.info(f"Creating draft invoice for {recipient_name}")
     created = await _client(ctx).create_invoice(data)
     invoice_id = created.get("id", "")
+    await ctx.report_progress(1, 3)
+    await ctx.info("Finalizing invoice (assigns number)")
     await _client(ctx).finalize_invoice(invoice_id)
+    await ctx.report_progress(2, 3)
+    await ctx.info(f"Sending invoice to {recipient_email}")
     await _client(ctx).send_invoice(invoice_id, recipient_email)
+    await ctx.report_progress(3, 3)
     invoice = await _client(ctx).get_invoice(invoice_id)
     invoice["deepLink"] = _deep_link(invoice_id)
     return _fmt({
@@ -1201,7 +1586,16 @@ async def create_and_send_invoice(
     })
 
 
-@mcp.tool
+@mcp.tool(
+    tags={"finance", "contact", "composite", "write"},
+    annotations=ToolAnnotations(
+        title="Find or create contact",
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=True,
+    ),
+)
 async def find_or_create_contact(
     ctx: Context,
     name: Annotated[str, "Company or person name to search for"],
@@ -1248,7 +1642,16 @@ async def find_or_create_contact(
     return _fmt(result)
 
 
-@mcp.tool
+@mcp.tool(
+    tags={"finance", "quotation", "invoice", "composite", "send", "irreversible"},
+    annotations=ToolAnnotations(
+        title="Convert quotation & send invoice (irreversible)",
+        readOnlyHint=False,
+        destructiveHint=True,
+        idempotentHint=False,
+        openWorldHint=True,
+    ),
+)
 async def convert_quotation_and_send(
     ctx: Context,
     quotation_id: Annotated[str, "UUID of the finalized quotation"],
@@ -1263,10 +1666,16 @@ async def convert_quotation_and_send(
     if status == "draft":
         return _fmt({"error": "Quotation is still a draft. Finalize it first.", "deepLink": _deep_link(quotation_id, edit=True)})
 
+    await ctx.info("Converting quotation to draft invoice")
     pursued = await _client(ctx).pursue_quotation(quotation_id)
     invoice_id = pursued.get("id", "")
+    await ctx.report_progress(1, 3)
+    await ctx.info("Finalizing invoice (assigns number)")
     await _client(ctx).finalize_invoice(invoice_id)
+    await ctx.report_progress(2, 3)
+    await ctx.info(f"Sending invoice to {recipient_email}")
     await _client(ctx).send_invoice(invoice_id, recipient_email)
+    await ctx.report_progress(3, 3)
     invoice = await _client(ctx).get_invoice(invoice_id)
     invoice["deepLink"] = _deep_link(invoice_id)
     return _fmt({
@@ -1279,7 +1688,15 @@ async def convert_quotation_and_send(
     })
 
 
-@mcp.tool
+@mcp.tool(
+    tags={"finance", "quotation", "list", "read"},
+    annotations=ToolAnnotations(
+        title="List quotations",
+        readOnlyHint=True,
+        idempotentHint=True,
+        openWorldHint=True,
+    ),
+)
 async def list_quotations(
     ctx: Context,
     status: Annotated[str | None, "Filter: draft, open, accepted, rejected, voided (comma-separated)"] = None,
@@ -1295,7 +1712,15 @@ async def list_quotations(
     return _fmt(result)
 
 
-@mcp.tool
+@mcp.tool(
+    tags={"finance", "invoice", "contact", "composite", "read"},
+    annotations=ToolAnnotations(
+        title="Get invoices for a contact",
+        readOnlyHint=True,
+        idempotentHint=True,
+        openWorldHint=True,
+    ),
+)
 async def get_contact_invoices(
     ctx: Context,
     contact_name: Annotated[str | None, "Contact name to search for"] = None,
@@ -1338,7 +1763,16 @@ async def get_contact_invoices(
     return _fmt(result)
 
 
-@mcp.tool
+@mcp.tool(
+    tags={"finance", "creditnote", "write"},
+    annotations=ToolAnnotations(
+        title="Create credit note",
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+        openWorldHint=True,
+    ),
+)
 async def create_credit_note(
     ctx: Context,
     recipient_name: Annotated[str, "Company or person name"],
@@ -1383,15 +1817,180 @@ async def create_credit_note(
     return _fmt(result)
 
 
-from datetime import datetime, timezone as _tz  # noqa: E402
-from starlette.requests import Request as _SReq  # noqa: E402
-from starlette.responses import JSONResponse as _SResp  # noqa: E402
+from datetime import timezone as _tz  # noqa: E402
 
 _start_time = datetime.now(_tz.utc)
 try:
     from mcp_lexoffice import __version__ as _version
 except ImportError:
     _version = "0.1.0"
+
+
+# ── Resources (reference data + server context) ──────────────────────
+# Static and cacheable reference data is exposed under the lexoffice:// scheme so
+# clients can pull it deterministically (e.g. while drafting an invoice) without
+# spending a tool call. The live-API resources mirror their list_* tool counterparts.
+
+# The fixed service catalog used when drafting invoices/quotations. Kept here (and
+# summarized in the server instructions) so the model can read pricing as data.
+SERVICE_CATALOG = [
+    {"name": "Digitale Sprechstunde", "unit": "Pauschal", "net_price": 995, "currency": "EUR"},
+    {"name": "Consulting", "unit": "Stunde", "net_price": 150, "currency": "EUR"},
+    {"name": "Platform Development", "unit": "Tag", "net_price": 1200, "currency": "EUR"},
+]
+
+
+@mcp.resource(
+    "lexoffice://service-catalog",
+    name="Service catalog",
+    description="Standard service offerings and pricing used when drafting invoices/quotations.",
+    mime_type="application/json",
+    annotations={"readOnlyHint": True, "idempotentHint": True},
+)
+def service_catalog_resource() -> str:
+    """Standard service offerings and their list pricing (net, EUR)."""
+    return _fmt(SERVICE_CATALOG)
+
+
+@mcp.resource(
+    "lexoffice://countries",
+    name="Countries",
+    description="Countries with tax classification (DE, intraCommunity, thirdPartyCountry).",
+    mime_type="application/json",
+    annotations={"readOnlyHint": True, "idempotentHint": True},
+)
+async def countries_resource(ctx: Context) -> str:
+    """Live country list with tax classification, from the Lexoffice API."""
+    return _fmt(await _client(ctx).list_countries())
+
+
+@mcp.resource(
+    "lexoffice://posting-categories",
+    name="Posting categories",
+    description="Buchungskonten (UUID, type income/outgo, contactRequired, splitAllowed).",
+    mime_type="application/json",
+    annotations={"readOnlyHint": True, "idempotentHint": True},
+)
+async def posting_categories_resource(ctx: Context) -> str:
+    """Live posting categories (Buchungskonten) for booking vouchers, from the API."""
+    return _fmt(await _client(ctx).list_posting_categories())
+
+
+@mcp.resource(
+    "lexoffice://payment-conditions",
+    name="Payment conditions",
+    description="Configured Zahlungsbedingungen (payment terms) for the account.",
+    mime_type="application/json",
+    annotations={"readOnlyHint": True, "idempotentHint": True},
+)
+async def payment_conditions_resource(ctx: Context) -> str:
+    """Live payment conditions (Zahlungsbedingungen), from the API."""
+    return _fmt(await _client(ctx).list_payment_conditions())
+
+
+@mcp.resource(
+    "lexoffice://tax-config",
+    name="Tax configuration",
+    description="Auto-detected tax regime (vatfree/net/gross) and default VAT rate for this account.",
+    mime_type="application/json",
+    annotations={"readOnlyHint": True, "idempotentHint": True},
+)
+async def tax_config_resource(ctx: Context) -> str:
+    """The account's resolved tax regime and default VAT rate (auto-detected from the profile)."""
+    return _fmt(await _get_tax_config(ctx))
+
+
+@mcp.resource(
+    "lexoffice://status",
+    name="Server status",
+    description="mcp-lexoffice service name, version, and uptime.",
+    mime_type="application/json",
+    annotations={"readOnlyHint": True},
+)
+def status_resource() -> str:
+    """Lightweight server status (name, version, uptime) — mirrors the /health route."""
+    return _fmt({
+        "service": "mcp-lexoffice",
+        "version": _version,
+        "uptime_seconds": int((datetime.now(_tz.utc) - _start_time).total_seconds()),
+    })
+
+
+# ── Prompts (guided multi-step accounting workflows) ─────────────────
+
+
+@mcp.prompt(
+    name="monthly_close",
+    description="Guided monthly accounting close: overview, overdue invoices, dunning suggestions.",
+    tags={"finance", "workflow"},
+)
+def monthly_close(months: str = "1") -> str:
+    """Walk the monthly close: pull the financial overview, list overdue invoices, suggest dunnings."""
+    return (
+        f"Run a monthly accounting close covering the last {months} month(s) using the "
+        "Lexware Office tools. Steps:\n"
+        f"1. Call get_financial_overview(months={months}) for revenue/expenses/net and the "
+        "open/overdue invoice counts. If the result's `truncated` flag is true, note that older "
+        "settled invoices were excluded.\n"
+        "2. Call list_invoices(status=\"open\") and identify any invoice whose daysOverdue is set.\n"
+        "3. For each overdue invoice, propose a dunning (create_dunning) — but do NOT create it "
+        "until I confirm. Summarize the amount, contact, and days overdue.\n"
+        "4. Finish with a short plain-language summary: net result, cash still owed, and the "
+        "recommended dunning actions."
+    )
+
+
+@mcp.prompt(
+    name="dunning_run",
+    description="Find overdue open invoices and walk creating payment reminders (Mahnungen).",
+    tags={"finance", "workflow", "dunning"},
+)
+def dunning_run() -> str:
+    """Guide a dunning run over all overdue open invoices."""
+    return (
+        "Help me chase overdue invoices in Lexware Office:\n"
+        "1. Call list_invoices(status=\"open\") and keep only the items that carry a daysOverdue "
+        "value (their dueDate has passed).\n"
+        "2. Present them as a table: voucherNumber, contactName, totalAmount, daysOverdue, deepLink. "
+        "Sort by daysOverdue descending.\n"
+        "3. For each one I confirm, call create_dunning(invoice_id=...) and then render_dunning_pdf "
+        "to get the document. create_dunning is a write action — never call it without my explicit "
+        "go-ahead for that specific invoice.\n"
+        "4. Report which dunnings were created and which I skipped."
+    )
+
+
+@mcp.prompt(
+    name="capture_receipt",
+    description="Belegfänger flow: resolve the vendor, then create a structured purchase voucher.",
+    tags={"finance", "workflow", "voucher", "belegfaenger"},
+)
+def capture_receipt(
+    vendor: str = "",
+    amount: str = "",
+    voucher_date: str = "",
+) -> str:
+    """Guide capturing a paper/PDF receipt into a structured, bank-matchable voucher."""
+    return (
+        "Capture a receipt into Lexware Office as a structured, bank-matchable voucher.\n"
+        f"Vendor: {vendor or '(ask me)'} · Amount (gross EUR): {amount or '(ask me)'} · "
+        f"Date: {voucher_date or '(ask me)'}\n\n"
+        "Steps:\n"
+        "1. Resolve the vendor with find_or_create_contact(name=<vendor>, role=\"vendor\"). If it "
+        "returns multiple_matches, ask me which one before continuing.\n"
+        "2. Call create_voucher with total_amount=<gross EUR>, voucher_date=<yyyy-MM-dd>, "
+        "contact_id=<resolved id>, tax_type=\"gross\", and (if I provide one) the receipt PDF as "
+        "file_content + file_name. The default posting category is 'Lizenzen und Konzessionen'; "
+        "override category_id only if I tell you the expense type.\n"
+        "3. Inspect the result's _enrichment block — confirm amount_persisted, contact_attached, "
+        "and (if a file was given) file_attached are all true. If tax_rate_adjusted is set, tell me "
+        "the VAT was re-booked at 0% and must be corrected in 'Zu prüfen'.\n"
+        "4. Return the deepLink so I can review the voucher."
+    )
+
+
+from starlette.requests import Request as _SReq  # noqa: E402
+from starlette.responses import JSONResponse as _SResp  # noqa: E402
 
 
 @mcp.custom_route("/health", methods=["GET"])

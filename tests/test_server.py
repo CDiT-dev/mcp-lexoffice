@@ -27,10 +27,29 @@ from mcp_lexoffice.server import (
 
 
 class FakeContext:
-    """Minimal stand-in for fastmcp Context with lifespan_context."""
+    """Minimal stand-in for fastmcp Context with lifespan_context.
+
+    Provides no-op async ``info`` / ``debug`` / ``warning`` / ``error`` / ``report_progress``
+    methods so tools that thread Context logging/progress can be unit-tested directly.
+    """
 
     def __init__(self, lexoffice_client):
         self.lifespan_context = {"lexoffice": lexoffice_client}
+
+    async def info(self, *args, **kwargs):
+        return None
+
+    async def debug(self, *args, **kwargs):
+        return None
+
+    async def warning(self, *args, **kwargs):
+        return None
+
+    async def error(self, *args, **kwargs):
+        return None
+
+    async def report_progress(self, *args, **kwargs):
+        return None
 
 
 def make_ctx(method_responses: dict[str, object], *, tax_type: str = "vatfree") -> FakeContext:
@@ -1192,10 +1211,11 @@ async def test_get_financial_overview():
         }
     })
     result = await get_financial_overview(ctx, months=6)
-    parsed = json.loads(result)
+    parsed = result.model_dump()
     assert "monthly" in parsed
     assert "open_invoices" in parsed
     assert "overdue_invoices" in parsed
+    assert "truncated" in parsed
 
 
 async def test_get_financial_overview_empty():
@@ -1203,10 +1223,11 @@ async def test_get_financial_overview_empty():
 
     ctx = make_ctx({"filter_vouchers": {"content": []}})
     result = await get_financial_overview(ctx, months=3)
-    parsed = json.loads(result)
+    parsed = result.model_dump()
     assert parsed["monthly"] == []
     assert parsed["open_invoices"] == 0
     assert parsed["overdue_invoices"] == 0
+    assert parsed["truncated"] is False
 
 
 async def test_get_financial_overview_monthly_grouping():
@@ -1228,7 +1249,7 @@ async def test_get_financial_overview_monthly_grouping():
     ctx = FakeContext(mock_client)
 
     result = await get_financial_overview(ctx, months=6)
-    parsed = json.loads(result)
+    parsed = result.model_dump()
     assert len(parsed["monthly"]) == 1
     month = parsed["monthly"][0]
     assert month["month"] == "2026-01"
@@ -1255,7 +1276,7 @@ async def test_get_financial_overview_months_limit():
     ctx = FakeContext(mock_client)
 
     result = await get_financial_overview(ctx, months=2)
-    parsed = json.loads(result)
+    parsed = result.model_dump()
     assert len(parsed["monthly"]) == 2
     # Should be most recent first
     assert parsed["monthly"][0]["month"] == "2026-03"
@@ -1282,9 +1303,22 @@ async def test_get_financial_overview_overdue_count():
     ctx = FakeContext(mock_client)
 
     result = await get_financial_overview(ctx, months=1)
-    parsed = json.loads(result)
+    parsed = result.model_dump()
     assert parsed["open_invoices"] == 3
     assert parsed["overdue_invoices"] == 2
+
+
+async def test_get_financial_overview_truncated_flag():
+    """A full 250-row page sets the truncated marker so figures aren't silently partial."""
+    from mcp_lexoffice.server import get_financial_overview
+
+    full_page = {"content": [{"voucherDate": "2026-01-10", "totalAmount": 1} for _ in range(250)]}
+    mock_client = AsyncMock()
+    mock_client.filter_vouchers.side_effect = [full_page, {"content": []}, {"content": []}]
+    ctx = FakeContext(mock_client)
+
+    result = await get_financial_overview(ctx, months=6)
+    assert result.truncated is True
 
 
 # ── Payment status ──────────────────────────────────────────────────
@@ -2218,3 +2252,87 @@ async def test_create_article_tax_rate_override():
     result = await create_article(ctx, name="Books", net_price=50, tax_rate=7)
     call_data = ctx.lifespan_context["lexoffice"].create_article.call_args[0][0]
     assert call_data["price"]["taxRatePercentage"] == 7
+
+
+# ── fastmcp uplift: annotations, resources, prompts ──────────────────
+
+
+async def test_all_tools_have_annotations():
+    """Every tool carries an annotations block with a human title (B)."""
+    tools = await mcp.list_tools()
+    assert len(tools) == 41
+    for t in tools:
+        assert t.annotations is not None, f"{t.name} missing annotations"
+        assert t.annotations.title, f"{t.name} missing annotation title"
+
+
+async def test_read_tools_marked_read_only():
+    """Pure reads advertise readOnlyHint so clients can skip confirmations."""
+    tools = {t.name: t for t in await mcp.list_tools()}
+    for name in ("get_profile", "get_invoice", "list_invoices", "search_contacts",
+                 "get_financial_overview", "list_countries", "get_voucher"):
+        assert tools[name].annotations.readOnlyHint is True, name
+
+
+async def test_irreversible_tools_marked_destructive():
+    """Finalize/send/delete carry destructiveHint so clients can warn before running them."""
+    tools = {t.name: t for t in await mcp.list_tools()}
+    for name in ("finalize_invoice", "send_invoice", "delete_draft_invoice",
+                 "finalize_quotation", "create_and_send_invoice", "convert_quotation_and_send"):
+        assert tools[name].annotations.destructiveHint is True, name
+
+
+async def test_tools_carry_tags():
+    """Tags replace the manual [finance] docstring prefix for client-side filtering."""
+    tools = {t.name: t for t in await mcp.list_tools()}
+    assert "finance" in tools["get_profile"].tags
+    assert "irreversible" in tools["finalize_invoice"].tags
+    assert "belegfaenger" in tools["create_voucher"].tags
+
+
+async def test_financial_overview_advertises_output_schema():
+    """The Pydantic return gives fastmcp an output schema (structured content)."""
+    tools = {t.name: t for t in await mcp.list_tools()}
+    assert tools["get_financial_overview"].output_schema is not None
+
+
+async def test_reference_resources_registered():
+    """Reference data is exposed under the lexoffice:// scheme (D)."""
+    resources = {str(r.uri) for r in await mcp.list_resources()}
+    for uri in ("lexoffice://service-catalog", "lexoffice://countries",
+                "lexoffice://posting-categories", "lexoffice://payment-conditions",
+                "lexoffice://tax-config", "lexoffice://status"):
+        assert uri in resources, uri
+
+
+async def test_workflow_prompts_registered():
+    """Guided multi-step workflows are exposed as prompts (E)."""
+    prompts = {p.name for p in await mcp.list_prompts()}
+    assert {"monthly_close", "dunning_run", "capture_receipt"} <= prompts
+
+
+async def test_service_catalog_resource_content():
+    from mcp_lexoffice.server import service_catalog_resource
+
+    parsed = json.loads(service_catalog_resource())
+    names = {entry["name"] for entry in parsed}
+    assert "Digitale Sprechstunde" in names
+    assert "Consulting" in names
+
+
+async def test_countries_resource_uses_client():
+    from mcp_lexoffice.server import countries_resource
+
+    ctx = make_ctx({"list_countries": [{"countryCode": "DE"}]})
+    parsed = json.loads(await countries_resource(ctx))
+    assert parsed[0]["countryCode"] == "DE"
+
+
+def test_capture_receipt_prompt_weaves_args():
+    from mcp_lexoffice.server import capture_receipt
+
+    text = capture_receipt(vendor="Acme GmbH", amount="119.00", voucher_date="2026-05-29")
+    assert "Acme GmbH" in text
+    assert "119.00" in text
+    assert "find_or_create_contact" in text
+    assert "create_voucher" in text

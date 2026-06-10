@@ -3,7 +3,7 @@
 MCP server for **Lexware Office** (formerly Lexoffice) — Python + FastMCP 3.
 
 ## Stack
-- Python 3.11+, FastMCP 3.x, httpx, python-dotenv
+- Python 3.11+, FastMCP `>=3.4.2,<4.0.0`, httpx, python-dotenv
 - Lexware Office REST API (`https://api.lexoffice.io/v1`)
 - Transport: streamable-http with `json_response=True` (port 8000)
 - Auth: Bearer token from env/.env (with `op://` 1Password fallback)
@@ -41,6 +41,24 @@ LEXOFFICE_API_KEY='op://Vault/item-id/API key' python -m mcp_lexoffice.server
 - **Vouchers**: upload_voucher (raw file → Beleg-Eingang), create_voucher (structured purchaseinvoice w/ amount+vendor, optional PDF attach + read-back), attach_voucher_file, get_voucher, update_voucher, list_vouchers, list_posting_categories
 - **Other**: get_profile, list_payment_conditions, list_countries
 
+All 41 tools carry MCP annotations (`readOnlyHint` on reads, `destructiveHint` on
+finalize/send/delete, `idempotentHint`, `openWorldHint`, human `title`) and first-class
+`tags` (e.g. `finance`, `invoice`, `irreversible`, `belegfaenger`). `get_financial_overview`
+returns a typed Pydantic model (`FinancialOverview`) so fastmcp advertises an output schema;
+it also sets a `truncated` flag when an underlying voucher page hits the 250-row cap.
+
+## Resources (`lexoffice://`)
+Reference/context data exposed as resources so the model can pull it without a tool call:
+- `lexoffice://service-catalog` — standard offerings + pricing (static)
+- `lexoffice://countries`, `lexoffice://posting-categories`, `lexoffice://payment-conditions` — live API reference data
+- `lexoffice://tax-config` — auto-detected tax regime + default VAT rate
+- `lexoffice://status` — service name, version, uptime (mirrors `/health`)
+
+## Prompts (guided workflows)
+- `monthly_close` — overview → overdue invoices → suggested dunnings
+- `dunning_run` — find overdue open invoices and walk creating Mahnungen
+- `capture_receipt` — Belegfänger flow: find_or_create_contact → create_voucher (+ optional PDF)
+
 ## API Notes
 - Rate limit: 2 requests/second (HTTP 429 on exceed, auto-retry with Retry-After)
 - All mutations use optimistic locking via `version` field
@@ -53,5 +71,5 @@ LEXOFFICE_API_KEY='op://Vault/item-id/API key' python -m mcp_lexoffice.server
 ```bash
 source .venv/bin/activate
 pip install -e ".[test]"
-python -m pytest tests/ -v  # 204 tests
+python -m pytest tests/ -v  # 248 tests
 ```

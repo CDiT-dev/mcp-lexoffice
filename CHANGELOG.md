@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.3.11] - 2026-06-10
+
+- feat(lexoffice): unify ToolError + type remaining returns (pass 3) (#17)
+
+
 ## [0.3.9] - 2026-06-10
 
 - feat: fastmcp 3.4.2 uplift — annotations, structured output, resources, prompts, context (#16)

@@ -11,6 +11,8 @@ from unittest.mock import AsyncMock, patch
 import httpx
 import pytest
 
+from pydantic import BaseModel
+
 from mcp_lexoffice.server import (
     DEFAULT_TAX_RATE,
     _build_address,
@@ -21,6 +23,25 @@ from mcp_lexoffice.server import (
     _get_tax_config,
     mcp,
 )
+
+
+def as_dict(result):
+    """Normalize any tool return into a plain Python object for assertions.
+
+    Tools now return typed Pydantic models (structured output); a handful still return JSON
+    strings (bare-list / polymorphic returns). This helper makes both shapes assertable with
+    the same ``parsed[...]`` syntax the tests already use:
+
+    - Pydantic model  → ``model_dump(by_alias=True)`` so top-level wire keys stay camelCase
+      exactly as the model serializes them on the wire (the format clients depend on).
+    - JSON string     → ``json.loads`` (identical to the old behavior).
+    - list / dict     → returned unchanged.
+    """
+    if isinstance(result, BaseModel):
+        return result.model_dump(by_alias=True)
+    if isinstance(result, str):
+        return json.loads(result)
+    return result
 
 
 # ── Helper: build a fake Context ─────────────────────────────────────
@@ -70,7 +91,7 @@ def make_ctx(method_responses: dict[str, object], *, tax_type: str = "vatfree") 
 
 def test_fmt_pretty_json():
     result = _fmt({"key": "wert", "nested": [1, 2]})
-    parsed = json.loads(result)
+    parsed = as_dict(result)
     assert parsed["key"] == "wert"
     assert "\n" in result
 
@@ -83,18 +104,18 @@ def test_fmt_unicode():
 def test_fmt_with_date():
     """_fmt should handle date objects via default=str."""
     result = _fmt({"date": date(2026, 1, 15)})
-    parsed = json.loads(result)
+    parsed = as_dict(result)
     assert parsed["date"] == "2026-01-15"
 
 
 def test_fmt_empty():
     result = _fmt({})
-    assert json.loads(result) == {}
+    assert as_dict(result) == {}
 
 
 def test_fmt_nested():
     result = _fmt({"a": {"b": {"c": 1}}})
-    parsed = json.loads(result)
+    parsed = as_dict(result)
     assert parsed["a"]["b"]["c"] == 1
 
 
@@ -246,7 +267,7 @@ async def test_get_profile_tool():
 
     ctx = make_ctx({"get_profile": {"companyName": "CDIT", "taxType": "vatfree"}})
     result = await get_profile(ctx)
-    parsed = json.loads(result)
+    parsed = as_dict(result)
     assert parsed["companyName"] == "CDIT"
 
 
@@ -255,7 +276,7 @@ async def test_get_profile_returns_valid_json():
 
     ctx = make_ctx({"get_profile": {"a": 1}})
     result = await get_profile(ctx)
-    json.loads(result)  # should not raise
+    as_dict(result)  # should not raise
 
 
 # ── Invoice tools ────────────────────────────────────────────────────
@@ -270,7 +291,7 @@ async def test_create_draft_invoice_tool():
         recipient_name="Acme GmbH",
         line_items=[{"name": "Consulting", "unit_price": 3000, "quantity": 1}],
     )
-    parsed = json.loads(result)
+    parsed = as_dict(result)
     assert parsed["id"] == "inv-1"
     assert "deepLink" in parsed
     call_args = ctx.lifespan_context["lexoffice"].create_invoice.call_args
@@ -289,7 +310,7 @@ async def test_create_draft_invoice_deep_link_is_edit():
         recipient_name="Test",
         line_items=[{"name": "A", "unit_price": 1}],
     )
-    parsed = json.loads(result)
+    parsed = as_dict(result)
     assert "/edit/" in parsed["deepLink"]
 
 
@@ -422,7 +443,7 @@ async def test_finalize_invoice_tool():
         "get_invoice": {"id": "inv-1", "voucherNumber": "RE-2026-001", "voucherStatus": "open"},
     })
     result = await finalize_invoice(ctx, invoice_id="inv-1")
-    parsed = json.loads(result)
+    parsed = as_dict(result)
     assert parsed["voucherNumber"] == "RE-2026-001"
     assert "deepLink" in parsed
 
@@ -436,7 +457,7 @@ async def test_finalize_invoice_deep_link_is_view():
         "get_invoice": {"id": "inv-1", "voucherStatus": "open"},
     })
     result = await finalize_invoice(ctx, invoice_id="inv-1")
-    parsed = json.loads(result)
+    parsed = as_dict(result)
     assert "/view/" in parsed["deepLink"]
     assert "/edit/" not in parsed["deepLink"]
 
@@ -446,7 +467,7 @@ async def test_send_invoice_blocks_draft():
 
     ctx = make_ctx({"get_invoice": {"id": "inv-1", "voucherStatus": "draft"}})
     result = await send_invoice(ctx, invoice_id="inv-1", recipient_email="test@test.de")
-    parsed = json.loads(result)
+    parsed = as_dict(result)
     assert "error" in parsed
     assert "draft" in parsed["error"].lower()
     assert "/edit/" in parsed["deepLink"]
@@ -460,7 +481,7 @@ async def test_send_invoice_finalized():
         "send_invoice": None,
     })
     result = await send_invoice(ctx, invoice_id="inv-1", recipient_email="test@test.de")
-    parsed = json.loads(result)
+    parsed = as_dict(result)
     assert parsed["status"] == "sent"
     assert parsed["recipient"] == "test@test.de"
     assert parsed["invoice_id"] == "inv-1"
@@ -475,7 +496,7 @@ async def test_send_invoice_paidoff_status_allowed():
         "send_invoice": None,
     })
     result = await send_invoice(ctx, invoice_id="inv-1", recipient_email="x@y.de")
-    parsed = json.loads(result)
+    parsed = as_dict(result)
     assert parsed["status"] == "sent"
 
 
@@ -484,12 +505,12 @@ async def test_get_invoice_tool_deep_link():
 
     ctx = make_ctx({"get_invoice_or_voucher": {"id": "inv-1", "voucherStatus": "draft", "_resolvedVia": "invoices"}})
     result = await get_invoice(ctx, invoice_id="inv-1")
-    parsed = json.loads(result)
+    parsed = as_dict(result)
     assert "edit" in parsed["deepLink"]
 
     ctx2 = make_ctx({"get_invoice_or_voucher": {"id": "inv-2", "voucherStatus": "open", "_resolvedVia": "invoices"}})
     result2 = await get_invoice(ctx2, invoice_id="inv-2")
-    parsed2 = json.loads(result2)
+    parsed2 = as_dict(result2)
     assert "view" in parsed2["deepLink"]
 
 
@@ -498,7 +519,7 @@ async def test_get_invoice_tool_returns_valid_json():
 
     ctx = make_ctx({"get_invoice_or_voucher": {"id": "inv-1", "voucherStatus": "open", "totalAmount": 1500, "_resolvedVia": "invoices"}})
     result = await get_invoice(ctx, invoice_id="inv-1")
-    parsed = json.loads(result)
+    parsed = as_dict(result)
     assert parsed["totalAmount"] == 1500
 
 
@@ -507,7 +528,7 @@ async def test_get_invoice_pdf_tool():
 
     ctx = make_ctx({"render_invoice_document": {"documentFileId": "file-abc"}})
     result = await get_invoice_pdf(ctx, invoice_id="inv-1")
-    parsed = json.loads(result)
+    parsed = as_dict(result)
     assert parsed["documentFileId"] == "file-abc"
 
 
@@ -522,7 +543,7 @@ async def test_list_invoices_with_overdue():
         }
     })
     result = await list_invoices(ctx, status="open")
-    parsed = json.loads(result)
+    parsed = as_dict(result)
     assert parsed["content"][0]["daysOverdue"] > 0
     assert "deepLink" in parsed["content"][0]
 
@@ -540,7 +561,7 @@ async def test_list_invoices_not_overdue():
         }
     })
     result = await list_invoices(ctx)
-    parsed = json.loads(result)
+    parsed = as_dict(result)
     assert "daysOverdue" not in parsed["content"][0]
 
 
@@ -556,7 +577,7 @@ async def test_list_invoices_draft_no_overdue():
         }
     })
     result = await list_invoices(ctx)
-    parsed = json.loads(result)
+    parsed = as_dict(result)
     assert "daysOverdue" not in parsed["content"][0]
 
 
@@ -572,7 +593,7 @@ async def test_list_invoices_no_due_date():
         }
     })
     result = await list_invoices(ctx)
-    parsed = json.loads(result)
+    parsed = as_dict(result)
     assert "daysOverdue" not in parsed["content"][0]
 
 
@@ -588,7 +609,7 @@ async def test_list_invoices_invalid_due_date():
         }
     })
     result = await list_invoices(ctx)
-    parsed = json.loads(result)
+    parsed = as_dict(result)
     assert "daysOverdue" not in parsed["content"][0]
 
 
@@ -604,7 +625,7 @@ async def test_list_invoices_deep_links_on_all():
         }
     })
     result = await list_invoices(ctx)
-    parsed = json.loads(result)
+    parsed = as_dict(result)
     for item in parsed["content"]:
         assert "deepLink" in item
 
@@ -614,7 +635,7 @@ async def test_list_invoices_empty():
 
     ctx = make_ctx({"filter_vouchers": {"content": []}})
     result = await list_invoices(ctx)
-    parsed = json.loads(result)
+    parsed = as_dict(result)
     assert parsed["content"] == []
 
 
@@ -641,7 +662,7 @@ async def test_list_invoices_unchecked_beleg_tagged():
         }
     })
     result = await list_invoices(ctx)
-    parsed = json.loads(result)
+    parsed = as_dict(result)
     item = parsed["content"][0]
     assert "_note" in item
     assert "Beleg" in item["_note"]
@@ -661,7 +682,7 @@ async def test_list_invoices_mixed_invoice_and_beleg():
         }
     })
     result = await list_invoices(ctx)
-    parsed = json.loads(result)
+    parsed = as_dict(result)
     assert "_note" not in parsed["content"][0]
     assert "_note" in parsed["content"][1]
 
@@ -681,7 +702,7 @@ async def test_get_invoice_tool_voucher_fallback():
         }
     })
     result = await get_invoice(ctx, invoice_id="beleg-1")
-    parsed = json.loads(result)
+    parsed = as_dict(result)
     assert "_note" in parsed
     assert "Beleg" in parsed["_note"]
     assert "deepLink" in parsed
@@ -699,7 +720,7 @@ async def test_get_invoice_tool_invoice_no_note():
         }
     })
     result = await get_invoice(ctx, invoice_id="inv-1")
-    parsed = json.loads(result)
+    parsed = as_dict(result)
     assert "_note" not in parsed
     assert "deepLink" in parsed
 
@@ -713,7 +734,7 @@ async def test_upload_voucher_valid_pdf():
     ctx = make_ctx({"upload_file": {"id": "file-1"}})
     content = base64.b64encode(b"fake-pdf-content").decode()
     result = await upload_voucher(ctx, file_content=content, file_name="bill.pdf")
-    parsed = json.loads(result)
+    parsed = as_dict(result)
     assert parsed["id"] == "file-1"
 
 
@@ -723,7 +744,7 @@ async def test_upload_voucher_valid_png():
     ctx = make_ctx({"upload_file": {"id": "file-png"}})
     content = base64.b64encode(b"png-data").decode()
     result = await upload_voucher(ctx, file_content=content, file_name="receipt.png")
-    parsed = json.loads(result)
+    parsed = as_dict(result)
     assert parsed["id"] == "file-png"
 
 
@@ -733,7 +754,7 @@ async def test_upload_voucher_valid_jpg():
     ctx = make_ctx({"upload_file": {"id": "file-jpg"}})
     content = base64.b64encode(b"jpg-data").decode()
     result = await upload_voucher(ctx, file_content=content, file_name="photo.jpg")
-    parsed = json.loads(result)
+    parsed = as_dict(result)
     assert parsed["id"] == "file-jpg"
 
 
@@ -743,7 +764,7 @@ async def test_upload_voucher_valid_jpeg():
     ctx = make_ctx({"upload_file": {"id": "file-jpeg"}})
     content = base64.b64encode(b"jpeg-data").decode()
     result = await upload_voucher(ctx, file_content=content, file_name="scan.jpeg")
-    parsed = json.loads(result)
+    parsed = as_dict(result)
     assert parsed["id"] == "file-jpeg"
 
 
@@ -752,7 +773,7 @@ async def test_upload_voucher_bad_type():
 
     ctx = make_ctx({})
     result = await upload_voucher(ctx, file_content="abc", file_name="file.docx")
-    parsed = json.loads(result)
+    parsed = as_dict(result)
     assert "error" in parsed
     assert "Unsupported" in parsed["error"]
 
@@ -762,7 +783,7 @@ async def test_upload_voucher_bad_type_txt():
 
     ctx = make_ctx({})
     result = await upload_voucher(ctx, file_content="abc", file_name="notes.txt")
-    parsed = json.loads(result)
+    parsed = as_dict(result)
     assert "error" in parsed
 
 
@@ -771,7 +792,7 @@ async def test_upload_voucher_bad_type_xlsx():
 
     ctx = make_ctx({})
     result = await upload_voucher(ctx, file_content="abc", file_name="data.xlsx")
-    parsed = json.loads(result)
+    parsed = as_dict(result)
     assert "error" in parsed
 
 
@@ -781,7 +802,7 @@ async def test_upload_voucher_too_large():
     ctx = make_ctx({})
     big = base64.b64encode(b"x" * (6 * 1024 * 1024)).decode()
     result = await upload_voucher(ctx, file_content=big, file_name="huge.pdf")
-    parsed = json.loads(result)
+    parsed = as_dict(result)
     assert "error" in parsed
     assert "5MB" in parsed["error"]
 
@@ -794,7 +815,7 @@ async def test_upload_voucher_exactly_5mb():
     data = b"x" * (5 * 1024 * 1024)
     content = base64.b64encode(data).decode()
     result = await upload_voucher(ctx, file_content=content, file_name="exact.pdf")
-    parsed = json.loads(result)
+    parsed = as_dict(result)
     assert parsed["id"] == "file-5mb"
 
 
@@ -805,7 +826,7 @@ async def test_upload_voucher_case_insensitive_extension():
     ctx = make_ctx({"upload_file": {"id": "file-upper"}})
     content = base64.b64encode(b"data").decode()
     result = await upload_voucher(ctx, file_content=content, file_name="BILL.PDF")
-    parsed = json.loads(result)
+    parsed = as_dict(result)
     assert parsed["id"] == "file-upper"
 
 
@@ -843,7 +864,7 @@ async def test_create_voucher_persists_amount_and_contact():
         contact_id="vendor-1",
         category_id="cat-1",
     )
-    parsed = json.loads(result)
+    parsed = as_dict(result)
     assert parsed["id"] == "v-1"
     assert parsed["totalGrossAmount"] == 119.0
     assert parsed["contactId"] == "vendor-1"
@@ -892,7 +913,7 @@ async def test_create_voucher_net_unchecked_rejected():
         voucher_status="unchecked",
         category_id="cat-1",
     )
-    parsed = json.loads(result)
+    parsed = as_dict(result)
     assert "error" in parsed
     assert "net" in parsed["error"].lower()
 
@@ -1024,7 +1045,7 @@ async def test_create_voucher_attaches_file():
         file_content=content,
         file_name="invoice.pdf",
     )
-    parsed = json.loads(result)
+    parsed = as_dict(result)
     client.attach_voucher_file.assert_awaited_once()
     assert parsed["_enrichment"]["file_attached"] is True
 
@@ -1040,7 +1061,7 @@ async def test_create_voucher_file_without_name_errors():
         category_id="cat-1",
         file_content="abc",
     )
-    parsed = json.loads(result)
+    parsed = as_dict(result)
     assert "error" in parsed
     assert "file_name" in parsed["error"]
 
@@ -1061,7 +1082,7 @@ async def test_create_voucher_bad_attachment_type_reported():
         file_content=base64.b64encode(b"x").decode(),
         file_name="bad.docx",
     )
-    parsed = json.loads(result)
+    parsed = as_dict(result)
     # voucher still created; attachment skipped with an error surfaced
     assert parsed["id"] == "v-7"
     assert "attachment_error" in parsed
@@ -1102,7 +1123,7 @@ async def test_create_voucher_falls_back_to_zero_on_taxrate_rejection():
         category_id="cat-1",
         tax_rate=19,
     )
-    parsed = json.loads(result)
+    parsed = as_dict(result)
     assert parsed["id"] == "v-8"
     assert client.create_voucher.await_count == 2
     retried = client.create_voucher.call_args_list[1][0][0]
@@ -1168,7 +1189,7 @@ async def test_attach_voucher_file_tool():
     ctx = make_ctx({"attach_voucher_file": {"id": "file-9", "voucherId": "v-9"}})
     content = base64.b64encode(b"%PDF").decode()
     result = await attach_voucher_file(ctx, voucher_id="v-9", file_content=content, file_name="b.pdf")
-    parsed = json.loads(result)
+    parsed = as_dict(result)
     assert parsed["id"] == "file-9"
     assert parsed["deepLink"] == "https://app.lexoffice.de/#/voucher/view/v-9"
 
@@ -1178,7 +1199,7 @@ async def test_attach_voucher_file_bad_type():
 
     ctx = make_ctx({})
     result = await attach_voucher_file(ctx, voucher_id="v-9", file_content="abc", file_name="x.txt")
-    parsed = json.loads(result)
+    parsed = as_dict(result)
     assert "error" in parsed
 
 
@@ -1191,7 +1212,7 @@ async def test_list_posting_categories_filter():
     ]
     ctx = make_ctx({"list_posting_categories": cats})
     result = await list_posting_categories(ctx, category_type="outgo")
-    parsed = json.loads(result)
+    parsed = as_dict(result)
     assert len(parsed) == 1
     assert parsed[0]["id"] == "out-1"
 
@@ -1329,7 +1350,7 @@ async def test_get_payment_status_by_id():
 
     ctx = make_ctx({"get_payments": {"openAmount": 500}})
     result = await get_payment_status(ctx, invoice_id="inv-1")
-    parsed = json.loads(result)
+    parsed = as_dict(result)
     assert parsed["openAmount"] == 500
 
 
@@ -1338,7 +1359,7 @@ async def test_get_payment_status_no_params():
 
     ctx = make_ctx({})
     result = await get_payment_status(ctx)
-    parsed = json.loads(result)
+    parsed = as_dict(result)
     assert "error" in parsed
 
 
@@ -1356,7 +1377,7 @@ async def test_get_payment_status_by_contact_name():
     ctx = FakeContext(mock_client)
 
     result = await get_payment_status(ctx, contact_name="Acme")
-    parsed = json.loads(result)
+    parsed = as_dict(result)
     assert len(parsed) == 1
     assert parsed[0]["contactName"] == "Acme GmbH"
     assert parsed[0]["payment"]["openAmount"] == 1000
@@ -1376,7 +1397,7 @@ async def test_get_payment_status_by_contact_case_insensitive():
     ctx = FakeContext(mock_client)
 
     result = await get_payment_status(ctx, contact_name="acme")
-    parsed = json.loads(result)
+    parsed = as_dict(result)
     assert len(parsed) == 1
 
 
@@ -1392,7 +1413,7 @@ async def test_get_payment_status_by_contact_no_matches():
     ctx = FakeContext(mock_client)
 
     result = await get_payment_status(ctx, contact_name="Nonexistent")
-    parsed = json.loads(result)
+    parsed = as_dict(result)
     assert parsed == []
 
 
@@ -1410,7 +1431,7 @@ async def test_get_payment_status_by_contact_payment_error():
     ctx = FakeContext(mock_client)
 
     result = await get_payment_status(ctx, contact_name="Acme")
-    parsed = json.loads(result)
+    parsed = as_dict(result)
     assert len(parsed) == 1
     assert parsed[0]["payment"]["status"] == "unknown"
 
@@ -1423,7 +1444,7 @@ async def test_create_contact_company():
 
     ctx = make_ctx({"create_contact": {"id": "c-1"}})
     result = await create_contact(ctx, company_name="Acme GmbH", role="customer")
-    parsed = json.loads(result)
+    parsed = as_dict(result)
     assert parsed["id"] == "c-1"
     assert "deepLink" in parsed
     call_data = ctx.lifespan_context["lexoffice"].create_contact.call_args[0][0]
@@ -1436,7 +1457,7 @@ async def test_create_contact_person():
 
     ctx = make_ctx({"create_contact": {"id": "c-2"}})
     result = await create_contact(ctx, first_name="Max", last_name="Müller")
-    parsed = json.loads(result)
+    parsed = as_dict(result)
     assert parsed["id"] == "c-2"
     call_data = ctx.lifespan_context["lexoffice"].create_contact.call_args[0][0]
     assert call_data["person"]["firstName"] == "Max"
@@ -1448,7 +1469,7 @@ async def test_create_contact_person_first_name_only():
 
     ctx = make_ctx({"create_contact": {"id": "c-3"}})
     result = await create_contact(ctx, first_name="Max")
-    parsed = json.loads(result)
+    parsed = as_dict(result)
     assert parsed["id"] == "c-3"
     call_data = ctx.lifespan_context["lexoffice"].create_contact.call_args[0][0]
     assert call_data["person"]["firstName"] == "Max"
@@ -1460,7 +1481,7 @@ async def test_create_contact_no_name():
 
     ctx = make_ctx({})
     result = await create_contact(ctx)
-    parsed = json.loads(result)
+    parsed = as_dict(result)
     assert "error" in parsed
 
 
@@ -1567,7 +1588,7 @@ async def test_search_contacts_deep_links():
         }
     })
     result = await search_contacts(ctx)
-    parsed = json.loads(result)
+    parsed = as_dict(result)
     for item in parsed["content"]:
         assert "deepLink" in item
         assert "/contacts/" in item["deepLink"]
@@ -1588,7 +1609,7 @@ async def test_get_contact_tool():
 
     ctx = make_ctx({"get_contact": {"id": "c-1", "company": {"name": "Acme"}}})
     result = await get_contact(ctx, contact_id="c-1")
-    parsed = json.loads(result)
+    parsed = as_dict(result)
     assert parsed["company"]["name"] == "Acme"
     assert "deepLink" in parsed
     assert "/contacts/c-1" in parsed["deepLink"]
@@ -1607,7 +1628,7 @@ async def test_update_contact_tool():
     ctx = FakeContext(mock_client)
 
     result = await update_contact(ctx, contact_id="c-1", company_name="New Name")
-    parsed = json.loads(result)
+    parsed = as_dict(result)
     assert parsed["version"] == 2
     assert "deepLink" in parsed
 
@@ -1657,7 +1678,7 @@ async def test_update_contact_no_changes():
     ctx = FakeContext(mock_client)
 
     result = await update_contact(ctx, contact_id="c-4")
-    parsed = json.loads(result)
+    parsed = as_dict(result)
     assert parsed["version"] == 1
 
 
@@ -1673,7 +1694,7 @@ async def test_create_draft_quotation_tool():
         recipient_name="Test Client",
         line_items=[{"name": "Service", "unit_price": 500}],
     )
-    parsed = json.loads(result)
+    parsed = as_dict(result)
     assert parsed["id"] == "q-1"
     assert "deepLink" in parsed
     assert "/edit/" in parsed["deepLink"]
@@ -1756,7 +1777,7 @@ async def test_finalize_quotation_tool():
         "get_quotation": {"id": "q-1", "voucherNumber": "AG-001", "voucherStatus": "open"},
     })
     result = await finalize_quotation(ctx, quotation_id="q-1")
-    parsed = json.loads(result)
+    parsed = as_dict(result)
     assert parsed["voucherNumber"] == "AG-001"
     assert "/view/" in parsed["deepLink"]
 
@@ -1766,7 +1787,7 @@ async def test_pursue_quotation_blocks_draft():
 
     ctx = make_ctx({"get_quotation": {"id": "q-1", "voucherStatus": "draft"}})
     result = await pursue_quotation_to_invoice(ctx, quotation_id="q-1")
-    parsed = json.loads(result)
+    parsed = as_dict(result)
     assert "error" in parsed
     assert "draft" in parsed["error"].lower()
     assert "/edit/" in parsed["deepLink"]
@@ -1781,7 +1802,7 @@ async def test_pursue_quotation_finalized():
     ctx = FakeContext(mock_client)
 
     result = await pursue_quotation_to_invoice(ctx, quotation_id="q-1")
-    parsed = json.loads(result)
+    parsed = as_dict(result)
     assert parsed["id"] == "inv-new"
     assert "/edit/" in parsed["deepLink"]
 
@@ -1794,7 +1815,7 @@ async def test_create_dunning_tool_with_note():
 
     ctx = make_ctx({"create_dunning": {"id": "d-1"}})
     result = await create_dunning(ctx, invoice_id="inv-1", note="Bitte zahlen")
-    parsed = json.loads(result)
+    parsed = as_dict(result)
     assert parsed["id"] == "d-1"
     assert "deepLink" in parsed
     call_data = ctx.lifespan_context["lexoffice"].create_dunning.call_args[0][0]
@@ -1807,7 +1828,7 @@ async def test_create_dunning_tool_without_note():
 
     ctx = make_ctx({"create_dunning": {"id": "d-2"}})
     result = await create_dunning(ctx, invoice_id="inv-2")
-    parsed = json.loads(result)
+    parsed = as_dict(result)
     assert parsed["id"] == "d-2"
     call_data = ctx.lifespan_context["lexoffice"].create_dunning.call_args[0][0]
     assert "text" not in call_data
@@ -1818,7 +1839,7 @@ async def test_render_dunning_pdf_tool():
 
     ctx = make_ctx({"render_dunning_document": {"documentFileId": "f-d"}})
     result = await render_dunning_pdf(ctx, dunning_id="d-1")
-    parsed = json.loads(result)
+    parsed = as_dict(result)
     assert parsed["documentFileId"] == "f-d"
 
 
@@ -1830,7 +1851,7 @@ async def test_list_articles_tool():
 
     ctx = make_ctx({"list_articles": {"content": [{"id": "a-1"}, {"id": "a-2"}]}})
     result = await list_articles(ctx)
-    parsed = json.loads(result)
+    parsed = as_dict(result)
     assert len(parsed["content"]) == 2
 
 
@@ -1839,7 +1860,7 @@ async def test_create_article_tool():
 
     ctx = make_ctx({"create_article": {"id": "a-1"}})
     result = await create_article(ctx, name="Sprechstunde", net_price=995.0, unit_name="Pauschal")
-    parsed = json.loads(result)
+    parsed = as_dict(result)
     assert parsed["id"] == "a-1"
     call_data = ctx.lifespan_context["lexoffice"].create_article.call_args[0][0]
     assert call_data["price"]["taxRatePercentage"] == 0
@@ -1891,7 +1912,7 @@ async def test_get_article_tool():
 
     ctx = make_ctx({"get_article": {"id": "a-1", "title": "Consulting", "version": 3}})
     result = await get_article(ctx, article_id="a-1")
-    parsed = json.loads(result)
+    parsed = as_dict(result)
     assert parsed["title"] == "Consulting"
     assert parsed["version"] == 3
 
@@ -1911,7 +1932,7 @@ async def test_update_article_tool():
     ctx = FakeContext(mock_client)
 
     result = await update_article(ctx, article_id="a-1", name="New Name", net_price=200.0)
-    parsed = json.loads(result)
+    parsed = as_dict(result)
     assert parsed["version"] == 3
 
     update_data = mock_client.update_article.call_args[0][1]
@@ -1975,7 +1996,7 @@ async def test_list_vouchers_tool():
         }
     })
     result = await list_vouchers(ctx, voucher_type="salesinvoice")
-    parsed = json.loads(result)
+    parsed = as_dict(result)
     assert len(parsed["content"]) == 2
     for item in parsed["content"]:
         assert "deepLink" in item
@@ -1997,7 +2018,7 @@ async def test_list_vouchers_empty():
 
     ctx = make_ctx({"filter_vouchers": {"content": []}})
     result = await list_vouchers(ctx, voucher_type="quotation")
-    parsed = json.loads(result)
+    parsed = as_dict(result)
     assert parsed["content"] == []
 
 
@@ -2015,7 +2036,7 @@ async def test_list_expenses_tool():
         }
     })
     result = await list_expenses(ctx)
-    parsed = json.loads(result)
+    parsed = as_dict(result)
     assert len(parsed["content"]) == 1
     assert "deepLink" in parsed["content"][0]
 
@@ -2039,7 +2060,7 @@ async def test_list_payment_conditions_tool():
 
     ctx = make_ctx({"list_payment_conditions": [{"id": "pc-1"}]})
     result = await list_payment_conditions(ctx)
-    parsed = json.loads(result)
+    parsed = as_dict(result)
     assert len(parsed) == 1
 
 
@@ -2051,7 +2072,7 @@ async def test_list_countries_tool():
 
     ctx = make_ctx({"list_countries": [{"countryCode": "DE"}]})
     result = await list_countries(ctx)
-    parsed = json.loads(result)
+    parsed = as_dict(result)
     assert parsed[0]["countryCode"] == "DE"
 
 
@@ -2111,7 +2132,7 @@ async def test_simple_tools_return_valid_json(tool_name):
     }
     ctx = make_ctx({method_map[tool_name]: {"data": "test"}})
     result = await tool_fn(ctx)
-    json.loads(result)  # should not raise
+    as_dict(result)  # should not raise
 
 
 # ── _get_tax_config ─────────────────────────────────────────────────
@@ -2314,7 +2335,7 @@ async def test_workflow_prompts_registered():
 async def test_service_catalog_resource_content():
     from mcp_lexoffice.server import service_catalog_resource
 
-    parsed = json.loads(service_catalog_resource())
+    parsed = as_dict(service_catalog_resource())
     names = {entry["name"] for entry in parsed}
     assert "Digitale Sprechstunde" in names
     assert "Consulting" in names
@@ -2324,7 +2345,7 @@ async def test_countries_resource_uses_client():
     from mcp_lexoffice.server import countries_resource
 
     ctx = make_ctx({"list_countries": [{"countryCode": "DE"}]})
-    parsed = json.loads(await countries_resource(ctx))
+    parsed = as_dict(await countries_resource(ctx))
     assert parsed[0]["countryCode"] == "DE"
 
 
@@ -2336,3 +2357,113 @@ def test_capture_receipt_prompt_weaves_args():
     assert "119.00" in text
     assert "find_or_create_contact" in text
     assert "create_voucher" in text
+
+
+# ── Typed output-schema coverage (deepen pass) ───────────────────────
+# These lock in the two invariants the deepen pass must never regress:
+#   1. Every typed model preserves the EXACT camelCase top-level wire keys it emits today.
+#   2. Every output model validates BOTH the success AND the error payload (the mcp-zernio bug).
+
+
+async def test_typed_output_schema_coverage():
+    """Far more than the pass-1 pair now advertise a typed output schema (additive)."""
+    tools = {t.name: t for t in await mcp.list_tools()}
+    # The high-value object/collection returns are typed.
+    typed = [
+        "get_profile", "create_draft_invoice", "finalize_invoice", "get_invoice", "list_invoices",
+        "list_expenses", "get_financial_overview", "search_contacts", "get_contact",
+        "create_contact", "update_contact", "create_draft_quotation", "finalize_quotation",
+        "pursue_quotation_to_invoice", "create_dunning", "list_articles", "create_article",
+        "get_article", "update_article", "list_vouchers", "get_voucher", "update_voucher",
+        "create_voucher", "attach_voucher_file", "upload_voucher", "get_recurring_template",
+        "create_and_send_invoice", "find_or_create_contact", "convert_quotation_and_send",
+        "list_quotations", "get_contact_invoices", "create_credit_note", "get_invoice_pdf",
+        "render_dunning_pdf", "send_invoice", "delete_draft_invoice",
+    ]
+    for name in typed:
+        assert tools[name].output_schema is not None, f"{name} lost its output schema"
+    assert len(typed) >= 35
+
+
+@pytest.mark.parametrize("model_name", [
+    "Profile", "Invoice", "VoucherList", "VoucherListEntry", "Contact", "ContactList",
+    "Quotation", "Article", "ArticleList", "Voucher", "CreateVoucherResult", "CreditNote",
+    "Dunning", "RecurringTemplate", "DocumentRef", "FileRef", "SendResult", "DeleteResult",
+    "SentInvoiceResult",
+])
+def test_models_validate_error_payload(model_name):
+    """Every output model must validate the {'error': ...} short-circuit payload (the exact
+    mcp-zernio regression: a model that only validated the happy path)."""
+    import mcp_lexoffice.server as srv
+
+    model = getattr(srv, model_name)
+    inst = model.model_validate({"error": "boom", "deepLink": "https://app.lexoffice.de/x"})
+    dumped = inst.model_dump(by_alias=True)
+    assert dumped["error"] == "boom"
+    assert dumped["deepLink"] == "https://app.lexoffice.de/x"
+
+
+def test_invoice_model_preserves_camelcase_top_level_keys():
+    """Invoice must round-trip the exact camelCase wire keys the API emits (no snake-casing)."""
+    from mcp_lexoffice.server import Invoice
+
+    api = {
+        "id": "inv-1", "voucherStatus": "open", "voucherNumber": "RE-2026-001",
+        "voucherDate": "2026-01-15", "totalPrice": {"totalNetAmount": 100},
+        "lineItems": [{"name": "X"}], "deepLink": "https://app.lexoffice.de/v",
+        # An unknown camelCase field the API may add later must survive untouched:
+        "someFutureField": "keep-me",
+    }
+    dumped = Invoice.model_validate(api).model_dump(by_alias=True, exclude_none=True)
+    for key in ("id", "voucherStatus", "voucherNumber", "voucherDate", "totalPrice",
+                "lineItems", "deepLink", "someFutureField"):
+        assert key in dumped, f"{key} not preserved on the wire"
+    assert dumped["voucherNumber"] == "RE-2026-001"
+    assert dumped["someFutureField"] == "keep-me"
+
+
+def test_voucherlist_row_keeps_injected_keys():
+    """VoucherList preserves server-injected daysOverdue/_note ONLY when present (key absent
+    otherwise — matching the original dict output, not a null-filled field)."""
+    from mcp_lexoffice.server import VoucherList
+
+    overdue = VoucherList.model_validate({"content": [
+        {"voucherId": "v1", "voucherStatus": "open", "contactName": "Acme",
+         "totalAmount": 99, "deepLink": "https://l", "daysOverdue": 5, "_note": "beleg"},
+    ]}).model_dump(by_alias=True, exclude_none=True)
+    row = overdue["content"][0]
+    assert row["daysOverdue"] == 5
+    assert row["_note"] == "beleg"
+    assert row["contactName"] == "Acme"
+
+    not_overdue = VoucherList.model_validate({"content": [
+        {"voucherId": "v2", "voucherStatus": "open", "deepLink": "https://l"},
+    ]}).model_dump(by_alias=True, exclude_none=True)
+    assert "daysOverdue" not in not_overdue["content"][0]
+
+
+def test_create_voucher_result_keeps_enrichment_block():
+    """CreateVoucherResult must carry the underscore-prefixed _enrichment wire key verbatim."""
+    from mcp_lexoffice.server import CreateVoucherResult
+
+    payload = {
+        "id": "v-1", "voucherStatus": "unchecked", "totalGrossAmount": 119.0,
+        "contactId": "vendor-1", "useCollectiveContact": False, "files": [],
+        "deepLink": "https://l",
+        "_enrichment": {"amount_persisted": True, "contact_attached": True, "file_attached": False},
+    }
+    dumped = CreateVoucherResult.model_validate(payload).model_dump(by_alias=True, exclude_none=True)
+    assert dumped["_enrichment"]["amount_persisted"] is True
+    assert dumped["contactId"] == "vendor-1"
+
+
+async def test_typed_tool_error_path_round_trips_through_handler():
+    """A tool that short-circuits with an error returns a model whose structured content
+    still carries the error key (end-to-end, not just the bare model)."""
+    from mcp_lexoffice.server import send_invoice
+
+    ctx = make_ctx({"get_invoice": {"id": "inv-1", "voucherStatus": "draft"}})
+    result = await send_invoice(ctx, invoice_id="inv-1", recipient_email="x@y.de")
+    parsed = as_dict(result)
+    assert "draft" in parsed["error"].lower()
+    assert "/edit/" in parsed["deepLink"]

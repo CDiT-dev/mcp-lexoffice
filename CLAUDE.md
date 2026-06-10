@@ -43,9 +43,32 @@ LEXOFFICE_API_KEY='op://Vault/item-id/API key' python -m mcp_lexoffice.server
 
 All 41 tools carry MCP annotations (`readOnlyHint` on reads, `destructiveHint` on
 finalize/send/delete, `idempotentHint`, `openWorldHint`, human `title`) and first-class
-`tags` (e.g. `finance`, `invoice`, `irreversible`, `belegfaenger`). `get_financial_overview`
-returns a typed Pydantic model (`FinancialOverview`) so fastmcp advertises an output schema;
-it also sets a `truncated` flag when an underlying voucher page hits the 250-row cap.
+`tags` (e.g. `finance`, `invoice`, `irreversible`, `belegfaenger`).
+
+### Typed output schemas
+36 of the 41 tools return typed Pydantic models, so fastmcp advertises a per-tool
+`output_schema` and emits machine-validated structured content alongside the human-readable
+JSON. Reusable domain models live in `server.py`: `Profile`, `Invoice`, `VoucherList`
+(+`VoucherListEntry`), `Contact`/`ContactList`, `Quotation`, `Article`/`ArticleList`,
+`Voucher`, `CreateVoucherResult`, `CreditNote`, `Dunning`, `RecurringTemplate`, `DocumentRef`,
+`FileRef`, `SendResult`, `DeleteResult`, `SentInvoiceResult`, plus the pass-1
+`FinancialOverview`. Each is reused across sibling get/list/create/finalize tools.
+
+**Backward-compat contract** (a manually-synced Cloudflare portal + live clients depend on it):
+every model subclasses `LexofficeBase` with `ConfigDict(populate_by_name=True, extra="allow")`
+and an optional `error: str | None`. Declared fields use the EXACT current camelCase wire keys
+(via field name or `serialization_alias`), `extra="allow"` carries the rest of the Lexoffice
+object graph (and conditionally-injected keys like `daysOverdue` / `_note` / `_enrichment` /
+`_action`) verbatim, and every model validates BOTH the success and the `{"error": ...}`
+short-circuit payload — so the structured schema never explodes on the error path.
+
+The 5 tools still returning a raw JSON string do so deliberately: `list_countries`,
+`list_posting_categories`, `list_payment_conditions`, `list_recurring_templates` return bare
+JSON arrays (a typed `list[Model]` return makes fastmcp wrap them under a `result` key, which
+would change the wire shape), and `get_payment_status` is polymorphic (dict | list | error).
+
+`get_financial_overview` additionally sets a `truncated` flag when an underlying voucher page
+hits the 250-row cap.
 
 ## Resources (`lexoffice://`)
 Reference/context data exposed as resources so the model can pull it without a tool call:
@@ -71,5 +94,5 @@ Reference/context data exposed as resources so the model can pull it without a t
 ```bash
 source .venv/bin/activate
 pip install -e ".[test]"
-python -m pytest tests/ -v  # 248 tests
+python -m pytest tests/ -v  # 272 tests
 ```

@@ -2620,3 +2620,151 @@ async def test_typed_tool_error_path_raises_tool_error():
     msg = str(exc.value)
     assert "draft" in msg.lower()
     assert "/edit/" in msg
+
+
+# ── Shelf items: tags, financial-overview pagination, resource template ─────
+
+
+async def test_irreversible_tools_carry_write_and_irreversible_tags():
+    """The six irreversible mutations advertise BOTH `write` and `irreversible` so a
+    client/portal can gate them. Tags are additive metadata — names/params/returns unchanged."""
+    tools = {t.name: t for t in await mcp.list_tools()}
+    irreversible = (
+        "send_invoice", "finalize_invoice", "finalize_quotation",
+        "convert_quotation_and_send", "create_and_send_invoice", "create_dunning",
+    )
+    for name in irreversible:
+        assert "write" in tools[name].tags, f"{name} missing 'write' tag"
+        assert "irreversible" in tools[name].tags, f"{name} missing 'irreversible' tag"
+
+
+async def test_read_tools_carry_read_tag_writes_carry_write_tag():
+    """Reads carry `read`; mutations carry `write`. No read tool claims `write` and vice-versa
+    (excluding the deliberately dual-tagged irreversible set)."""
+    tools = {t.name: t for t in await mcp.list_tools()}
+    reads = (
+        "get_profile", "get_invoice", "list_invoices", "list_expenses",
+        "get_financial_overview", "get_payment_status", "search_contacts", "get_contact",
+        "get_invoice_pdf", "render_dunning_pdf", "list_articles", "get_article",
+        "list_vouchers", "get_voucher", "list_posting_categories", "list_payment_conditions",
+        "list_countries", "list_recurring_templates", "get_recurring_template",
+        "list_quotations", "get_contact_invoices",
+    )
+    writes = (
+        "create_draft_invoice", "upload_voucher", "create_contact", "update_contact",
+        "create_draft_quotation", "pursue_quotation_to_invoice", "create_article",
+        "update_article", "update_voucher", "create_voucher", "attach_voucher_file",
+        "find_or_create_contact", "create_credit_note", "delete_draft_invoice",
+    )
+    for name in reads:
+        assert "read" in tools[name].tags, f"{name} missing 'read' tag"
+        assert "write" not in tools[name].tags, f"read tool {name} wrongly tagged 'write'"
+    for name in writes:
+        assert "write" in tools[name].tags, f"{name} missing 'write' tag"
+
+
+async def test_financial_overview_paginates_all_pages_no_silent_loss():
+    """get_financial_overview pages THROUGH a multi-page voucherlist (driven by the
+    `last`/`totalPages` envelope) instead of reading one page and dropping the rest."""
+    from mcp_lexoffice.server import get_financial_overview
+
+    # Sales spans two pages; both must be summed. Purchases & open are single empty pages.
+    sales_p0 = {
+        "content": [{"voucherDate": "2026-01-10", "totalAmount": 100}],
+        "totalPages": 2, "last": False,
+    }
+    sales_p1 = {
+        "content": [{"voucherDate": "2026-01-20", "totalAmount": 250}],
+        "totalPages": 2, "last": True,
+    }
+    empty = {"content": [], "totalPages": 1, "last": True}
+
+    mock_client = AsyncMock()
+    mock_client.filter_vouchers.side_effect = [sales_p0, sales_p1, empty, empty]
+    ctx = FakeContext(mock_client)
+
+    result = await get_financial_overview(ctx, months=6)
+    parsed = result.model_dump()
+    assert parsed["truncated"] is False
+    # Both pages of January sales summed: 100 + 250 = 350.
+    jan = next(m for m in parsed["monthly"] if m["month"] == "2026-01")
+    assert jan["revenue"] == 350.0
+    # Sales paginated twice (p0 + p1), then one call each for purchases and open = 4 total.
+    assert mock_client.filter_vouchers.call_count == 4
+
+
+async def test_financial_overview_truncates_at_page_ceiling():
+    """An account that never reports its last page is capped (truncated=True), never looped
+    forever and never silently partial."""
+    from mcp_lexoffice.server import get_financial_overview
+    import mcp_lexoffice.server as server_mod
+
+    # Every page claims there is more (last=False) — the hard ceiling must stop us.
+    never_last = {
+        "content": [{"voucherDate": "2026-01-10", "totalAmount": 1}],
+        "totalPages": 10_000, "last": False,
+    }
+    mock_client = AsyncMock()
+    mock_client.filter_vouchers.return_value = never_last
+    ctx = FakeContext(mock_client)
+
+    with patch.object(server_mod, "_FINANCIAL_MAX_PAGES", 3):
+        result = await get_financial_overview(ctx, months=6)
+    assert result.truncated is True
+    # Capped at 3 pages per query for all three queries (3 * 3 = 9 calls), then stopped.
+    assert mock_client.filter_vouchers.call_count == 9
+
+
+async def test_financial_overview_full_page_without_envelope_flags_truncated():
+    """Legacy/mocked responses with no paging envelope: a brimful page can't be proven
+    complete, so we flag truncated rather than silently dropping rows (back-compat path)."""
+    from mcp_lexoffice.server import get_financial_overview, _FINANCIAL_PAGE_SIZE
+
+    full_page = {"content": [{"voucherDate": "2026-01-10", "totalAmount": 1}
+                             for _ in range(_FINANCIAL_PAGE_SIZE)]}
+    mock_client = AsyncMock()
+    mock_client.filter_vouchers.side_effect = [full_page, {"content": []}, {"content": []}]
+    ctx = FakeContext(mock_client)
+
+    result = await get_financial_overview(ctx, months=6)
+    assert result.truncated is True
+    # No envelope → no extra page fetches: exactly one call per query.
+    assert mock_client.filter_vouchers.call_count == 3
+
+
+async def test_contact_invoices_resource_template_registered():
+    """The lexoffice://contact/{contact_id}/invoices resource TEMPLATE is registered."""
+    templates = {str(t.uri_template) for t in await mcp.list_resource_templates()}
+    assert "lexoffice://contact/{contact_id}/invoices" in templates
+
+
+async def test_contact_invoices_resource_returns_invoices():
+    """The resource template reuses get_contact_invoices and returns the contact's invoices."""
+    from mcp_lexoffice.server import contact_invoices_resource
+
+    ctx = make_ctx({
+        "filter_vouchers": {
+            "content": [
+                {"voucherId": "v-1", "voucherNumber": "RE-001", "totalAmount": 119.0,
+                 "voucherStatus": "open"},
+            ]
+        }
+    })
+    parsed = json.loads(await contact_invoices_resource("contact-123", ctx))
+    assert "error" not in parsed
+    assert parsed["content"][0]["voucherNumber"] == "RE-001"
+    assert "deepLink" in parsed["content"][0]
+
+
+async def test_contact_invoices_resource_is_error_path_safe():
+    """A ToolError inside get_contact_invoices (e.g. transport failure) must NOT abort the
+    resource read — it degrades to a structured {"error": ...} JSON document."""
+    from mcp_lexoffice.server import contact_invoices_resource
+
+    mock_client = AsyncMock()
+    mock_client.filter_vouchers.side_effect = RuntimeError("boom: API unreachable")
+    ctx = FakeContext(mock_client)
+
+    parsed = json.loads(await contact_invoices_resource("contact-123", ctx))
+    assert "error" in parsed
+    assert parsed["contactId"] == "contact-123"

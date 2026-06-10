@@ -731,7 +731,7 @@ async def finalize_invoice(
 
 
 @mcp.tool(
-    tags={"finance", "invoice", "delete", "irreversible"},
+    tags={"finance", "invoice", "delete", "write", "irreversible"},
     annotations=ToolAnnotations(
         title="Delete draft invoice",
         readOnlyHint=False,
@@ -758,7 +758,7 @@ async def delete_draft_invoice(
 
 
 @mcp.tool(
-    tags={"finance", "invoice", "send", "irreversible"},
+    tags={"finance", "invoice", "send", "write", "irreversible"},
     annotations=ToolAnnotations(
         title="Send invoice by email",
         readOnlyHint=False,
@@ -935,6 +935,71 @@ async def list_expenses(
     return VoucherList.model_validate(result)
 
 
+# Hard ceiling on pages fetched per voucher query, so a pathologically large account
+# can never hang the (often headless / portal-budgeted) call. 250 rows/page * 200 pages
+# = 50_000 vouchers — well beyond any realistic monthly-overview window.
+_FINANCIAL_PAGE_SIZE = 250
+_FINANCIAL_MAX_PAGES = 200
+
+
+async def _fetch_all_vouchers(
+    ctx: Context,
+    voucher_type: str,
+    *,
+    voucher_status: str | None,
+) -> tuple[list[dict], bool]:
+    """Fetch every voucher across all pages for a filter, returning (rows, truncated).
+
+    Replaces the old single-page-then-flag heuristic so the financial overview no longer
+    silently drops older settled invoices on busy accounts. Pagination is driven off the
+    Lexoffice voucherlist paging envelope (``last`` / ``totalPages``):
+
+    * keep requesting the next page until the API reports the last page, or
+    * stop at ``_FINANCIAL_MAX_PAGES`` and report ``truncated=True`` (explicit cap, never
+      a silent loss).
+
+    When the response carries no paging metadata at all (``last``/``totalPages`` absent),
+    we treat the single page as authoritative and only flag ``truncated`` if it came back
+    completely full — i.e. we cannot prove we saw everything."""
+    client = _client(ctx)
+    rows: list[dict] = []
+    page = 0
+    truncated = False
+
+    while True:
+        resp = await client.filter_vouchers(
+            voucher_type,
+            voucher_status=voucher_status,
+            page=page,
+            size=_FINANCIAL_PAGE_SIZE,
+        )
+        content = resp.get("content", []) or []
+        rows.extend(content)
+
+        has_paging = ("last" in resp) or ("totalPages" in resp)
+        if not has_paging:
+            # No envelope to drive pagination — a brimful page means there may be more
+            # we cannot reach safely, so be honest about it.
+            if len(content) >= _FINANCIAL_PAGE_SIZE:
+                truncated = True
+            break
+
+        total_pages = resp.get("totalPages")
+        is_last = bool(resp.get("last")) or (
+            isinstance(total_pages, int) and page >= total_pages - 1
+        )
+        if is_last or not content:
+            break
+
+        page += 1
+        if page >= _FINANCIAL_MAX_PAGES:
+            # Genuine more-data-exists situation we deliberately stop at.
+            truncated = True
+            break
+
+    return rows, truncated
+
+
 @mcp.tool(
     tags={"finance", "report", "read"},
     annotations=ToolAnnotations(
@@ -950,35 +1015,37 @@ async def get_financial_overview(
 ) -> FinancialOverview:
     """[finance] Get a monthly revenue/expense/net overview. Queries sales and purchase invoices.
 
-    months defaults to 6, maximum 12. Large ranges may be slow as it queries all settled invoices.
-    Each underlying voucher query is capped at 250 rows; if any page hits that cap, the result's
-    `truncated` flag is set and older settled invoices may be excluded from the figures."""
+    months defaults to 6, maximum 12. Large ranges may be slow as it pages through all settled
+    invoices. Each query is fully paginated; only an account exceeding the internal page ceiling
+    sets the result's `truncated` flag (older settled invoices may then be excluded)."""
     months = max(1, min(12, months))
     await ctx.info(f"Aggregating financial overview for the last {months} month(s)")
-    page_size = 250
-    sales = await _client(ctx).filter_vouchers("salesinvoice,invoice", voucher_status="paidoff", size=page_size)
+
+    sales, sales_trunc = await _fetch_all_vouchers(
+        ctx, "salesinvoice,invoice", voucher_status="paidoff"
+    )
     await ctx.report_progress(1, 3)
-    purchases = await _client(ctx).filter_vouchers("purchaseinvoice", voucher_status="paidoff", size=page_size)
+    purchases, purchases_trunc = await _fetch_all_vouchers(
+        ctx, "purchaseinvoice", voucher_status="paidoff"
+    )
     await ctx.report_progress(2, 3)
-    open_invoices = await _client(ctx).filter_vouchers("salesinvoice,invoice", voucher_status="open", size=page_size)
+    open_rows, open_trunc = await _fetch_all_vouchers(
+        ctx, "salesinvoice,invoice", voucher_status="open"
+    )
     await ctx.report_progress(3, 3)
 
-    # If any query returned a full page, the account has more settled vouchers than we fetched.
-    truncated = any(
-        len(page.get("content", [])) >= page_size
-        for page in (sales, purchases, open_invoices)
-    )
+    truncated = sales_trunc or purchases_trunc or open_trunc
 
     today = date.today()
     monthly: dict[str, dict[str, float]] = {}
 
-    for item in sales.get("content", []):
+    for item in sales:
         voucher_date = item.get("voucherDate", "")[:7]
         if voucher_date:
             monthly.setdefault(voucher_date, {"revenue": 0, "expenses": 0})
             monthly[voucher_date]["revenue"] += item.get("totalAmount", 0)
 
-    for item in purchases.get("content", []):
+    for item in purchases:
         voucher_date = item.get("voucherDate", "")[:7]
         if voucher_date:
             monthly.setdefault(voucher_date, {"revenue": 0, "expenses": 0})
@@ -994,9 +1061,9 @@ async def get_financial_overview(
             net=round(data["revenue"] - data["expenses"], 2),
         ))
 
-    open_count = len(open_invoices.get("content", []))
+    open_count = len(open_rows)
     overdue_count = sum(
-        1 for inv in open_invoices.get("content", [])
+        1 for inv in open_rows
         if inv.get("dueDate") and date.fromisoformat(inv["dueDate"][:10]) < today
     )
 
@@ -1323,7 +1390,7 @@ async def pursue_quotation_to_invoice(
 
 
 @mcp.tool(
-    tags={"finance", "dunning", "write"},
+    tags={"finance", "dunning", "write", "irreversible"},
     annotations=ToolAnnotations(
         title="Create dunning (Mahnung)",
         readOnlyHint=False,
@@ -1882,7 +1949,7 @@ async def get_recurring_template(
 
 
 @mcp.tool(
-    tags={"finance", "invoice", "composite", "send", "irreversible"},
+    tags={"finance", "invoice", "composite", "send", "write", "irreversible"},
     annotations=ToolAnnotations(
         title="Create, finalize & send invoice (irreversible)",
         readOnlyHint=False,
@@ -2021,7 +2088,7 @@ async def find_or_create_contact(
 
 
 @mcp.tool(
-    tags={"finance", "quotation", "invoice", "composite", "send", "irreversible"},
+    tags={"finance", "quotation", "invoice", "composite", "send", "write", "irreversible"},
     annotations=ToolAnnotations(
         title="Convert quotation & send invoice (irreversible)",
         readOnlyHint=False,
@@ -2305,6 +2372,28 @@ def status_resource() -> str:
         "version": _version,
         "uptime_seconds": int((datetime.now(_tz.utc) - _start_time).total_seconds()),
     })
+
+
+@mcp.resource(
+    "lexoffice://contact/{contact_id}/invoices",
+    name="Contact invoices",
+    description="All invoices for a contact (by UUID), mirroring the get_contact_invoices tool.",
+    mime_type="application/json",
+    annotations={"readOnlyHint": True, "idempotentHint": True},
+)
+async def contact_invoices_resource(contact_id: str, ctx: Context) -> str:
+    """Read-only view of a contact's invoices, reusing the get_contact_invoices tool.
+
+    Error-path-safe: instead of letting a ToolError (e.g. unknown contact) or transport
+    failure abort the resource read, any problem is captured and returned as a structured
+    ``{"error": ...}`` JSON document — the same permissive shape the typed tool returns."""
+    try:
+        result = await get_contact_invoices(ctx, contact_id=contact_id)
+        return _fmt(result.model_dump(by_alias=True, exclude_none=True))
+    except ToolError as exc:
+        return _fmt({"error": str(exc), "contactId": contact_id})
+    except Exception as exc:  # noqa: BLE001 — resources must degrade, never explode
+        return _fmt({"error": f"Failed to load invoices: {exc}", "contactId": contact_id})
 
 
 # ── Prompts (guided multi-step accounting workflows) ─────────────────

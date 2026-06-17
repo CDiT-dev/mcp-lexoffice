@@ -731,8 +731,11 @@ async def test_create_draft_invoice_currency():
     assert call_data["totalPrice"]["currency"] == "USD"
 
 
-async def test_create_draft_invoice_with_contact_id_discards_address_fields():
-    """contact_id sets address.contactId + linkedContactId; explicit street/zip/city are discarded."""
+async def test_create_draft_invoice_with_contact_id_sends_only_contact_id():
+    """contact_id sends address={contactId} ONLY so Lexware resolves the full
+    billing address and contact person (Ansprechpartner) from the contact record.
+    recipient_name/street/zip/city/countryCode must NOT be sent — including them
+    would flip Lexware into manual-address mode and leave the address blank."""
     from mcp_lexoffice.server import create_draft_invoice
 
     ctx = make_ctx({"create_invoice": {"id": "inv-contact-1"}})
@@ -751,12 +754,7 @@ async def test_create_draft_invoice_with_contact_id_discards_address_fields():
 
     call_data = ctx.lifespan_context["lexoffice"].create_invoice.call_args[0][0]
     addr = call_data["address"]
-    assert addr["contactId"] == "c-acme"
-    assert addr["name"] == "Acme GmbH"
-    assert addr["countryCode"] == "AT"
-    assert "street" not in addr
-    assert "zip" not in addr
-    assert "city" not in addr
+    assert addr == {"contactId": "c-acme"}
 
 
 async def test_create_draft_invoice_without_contact_id_omits_linked_contact_id():

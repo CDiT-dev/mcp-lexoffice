@@ -238,14 +238,14 @@ async def get_profile(ctx: Context) -> str:
 @mcp.tool
 async def create_draft_invoice(
     ctx: Context,
-    recipient_name: Annotated[str, "Company or person name for the invoice recipient (always required, even when contact_id is set — used as display name)"],
+    recipient_name: Annotated[str, "Company or person name for the invoice recipient. Used only when contact_id is NOT set — when contact_id is set, the name (and full address) are resolved from the contact record and this value is ignored."],
     line_items: Annotated[
         str,
         "JSON array of line items. Each: {name, unit_price, quantity?, unit_name?, description?, tax_rate?}",
     ],
     contact_id: Annotated[
         str | None,
-        "UUID of an existing Lexoffice contact. When set, the invoice is linked to this contact and Lexoffice auto-attaches the primary contact person (Ansprechpartner). Obtain via search_contacts first. Note: street/zip_code/city are ignored when contact_id is set — the address is pulled from the contact record.",
+        "UUID of an existing Lexoffice contact. When set, ONLY the contactId is sent so Lexware resolves the full billing address and auto-attaches the primary contact person (Ansprechpartner) from the contact record. Obtain via search_contacts first. Note: recipient_name/street/zip_code/city/country_code are all ignored when contact_id is set — every field is pulled from the contact record.",
     ] = None,
     street: Annotated[str | None, "Recipient street address"] = None,
     zip_code: Annotated[str | None, "Recipient postal code"] = None,
@@ -277,8 +277,12 @@ async def create_draft_invoice(
         return _fmt(pc_error)
     effective_rate = tax_rate if tax_rate is not None else tax_config["default_rate"]
     if contact_id:
-        address = _build_address(recipient_name, country_code=country_code)
-        address["contactId"] = contact_id
+        # Pass ONLY the contactId so Lexware resolves the full billing address
+        # AND attaches the primary contact person (Ansprechpartner) from the
+        # contact record. Including name/countryCode here flips Lexware into
+        # "manual address" mode, which prints just the literal fields supplied
+        # and leaves the resolved address and contact person blank.
+        address = {"contactId": contact_id}
     else:
         address = _build_address(recipient_name, street, zip_code, city, country_code)
     data: dict[str, Any] = {

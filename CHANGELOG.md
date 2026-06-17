@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.2.5] - 2026-06-17
+
+- Fix invoice address/contact-person not resolving from contact_id
+
+
 ## [0.2.4] - 2026-05-21
 
 - fix: omit paymentConditions so Lexware applies its own default

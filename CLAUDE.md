@@ -94,5 +94,5 @@ Reference/context data exposed as resources so the model can pull it without a t
 ```bash
 source .venv/bin/activate
 pip install -e ".[test]"
-python -m pytest tests/ -v  # 272 tests
+python -m pytest tests/ -v  # 297 tests
 ```

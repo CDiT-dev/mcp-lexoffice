@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.3.13] - 2026-06-30
+
+- docs: sync internal README to current surface (41 tools, 297 tests)
+
+
 ## [0.3.12] - 2026-06-10
 
 - feat(lexoffice): tags + financial-overview pagination + contact-invoices resource template (shelf) (#18)

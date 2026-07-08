@@ -2501,12 +2501,14 @@ def main():
         transport = "streamable-http"
 
     if transport == "streamable-http":
+        # fastmcp >=3.4.3 rejects non-localhost Host with 421 unless allowed_hosts set (edge CF-Access/Tailscale gated).
         mcp.run(
             transport=transport,
             host=host,
             port=port,
             json_response=True,
             stateless_http=True,
+            allowed_hosts=["*"],
         )
     else:
         mcp.run(transport=transport, host=host, port=port, json_response=True)

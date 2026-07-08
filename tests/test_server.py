@@ -2093,6 +2093,7 @@ def test_main_defaults_to_streamable_http():
             port=8000,
             json_response=True,
             stateless_http=True,
+            allowed_hosts=["*"],
         )
 
 

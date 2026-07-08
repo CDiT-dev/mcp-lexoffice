@@ -1,7 +1,7 @@
 schema: spec-driven
 
 references:
-  - mcp-fleet
+  - cdit
 
 # Project context (optional)
 # This is shown to AI when creating artifacts.

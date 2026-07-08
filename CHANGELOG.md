@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.3.14] - 2026-07-08
+
+- fix: fastmcp>=3.4.3 + allowed_hosts=["*"] — 3.4.3 rejects non-localhost Host with 421 (edge CF-Access/Tailscale gated)
+
+
 ## [0.3.13] - 2026-06-30
 
 - docs: sync internal README to current surface (41 tools, 297 tests)

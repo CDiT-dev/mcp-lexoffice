@@ -4,10 +4,14 @@ WORKDIR /app
 
 ENV PYTHONUNBUFFERED=1
 
-COPY pyproject.toml README.md ./
+COPY pyproject.toml uv.lock README.md ./
 COPY mcp_lexoffice/ mcp_lexoffice/
 
-RUN pip install --no-cache-dir . \
+RUN pip install --no-cache-dir uv \
+    && uv export --frozen --no-dev --no-emit-project -o /tmp/requirements.txt \
+    && pip install --no-cache-dir --require-hashes -r /tmp/requirements.txt \
+    && pip install --no-cache-dir --no-deps . \
+    && rm /tmp/requirements.txt \
     && addgroup --system --gid 1000 mcp \
     && adduser --system --uid 1000 --ingroup mcp mcp
 

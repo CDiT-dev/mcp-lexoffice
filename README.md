@@ -1,6 +1,6 @@
 # mcp-lexoffice
 
-MCP server for **Lexware Office** (formerly Lexoffice) — a Python-based accounting integration that exposes 27 tools for invoices, contacts, quotations, dunnings, articles, financial queries, and voucher management.
+MCP server for **Lexware Office** (formerly Lexoffice) — a Python-based accounting integration that exposes 41 tools for invoices, contacts, quotations, dunnings, articles, recurring templates, credit notes, financial queries, and voucher management.
 
 Built with [FastMCP 3](https://github.com/jlowin/fastmcp) and designed to work as a **Claude.ai custom connector**.
 
@@ -127,14 +127,16 @@ mcp-lexoffice.example.com {
 
 | Tool | Description |
 |------|-------------|
-| `create_draft_invoice` | Create a draft invoice with named parameters (recipient, line items, `payment_condition_id`). Payment conditions are pulled from the Lexware profile — omit `payment_condition_id` to use the organization default. Accepts optional `contact_id` to link an existing Lexoffice contact — Lexoffice then auto-attaches the primary contact person (Ansprechpartner). Returns ID + Lexoffice deep link. |
+| `create_draft_invoice` | Create a draft invoice with named parameters (recipient, line items, payment terms). Returns ID + Lexoffice deep link. |
+| `create_and_send_invoice` | One-shot flow: create draft → finalize → send by email. **Irreversible.** |
 | `finalize_invoice` | Finalize a draft — assigns invoice number, makes non-editable. **Cannot be undone.** |
 | `send_invoice` | Send a finalized invoice by email. Validates status before sending. |
+| `delete_draft_invoice` | Delete a draft invoice (drafts only; finalized invoices cannot be deleted). |
 | `get_invoice` | Get full invoice details with deep link (edit link for drafts, view link for finalized). |
 | `get_invoice_pdf` | Render and get the document file ID for a finalized invoice PDF. |
 | `list_invoices` | List sales invoices with status filter. Computes `daysOverdue` for overdue items. |
 
-**Invoice flow**: `search_contacts` (to get `contact_id` for existing customers) → `create_draft_invoice` → review in Lexoffice UI → `finalize_invoice` → `send_invoice`
+**Invoice flow**: `create_draft_invoice` → review in Lexoffice UI → `finalize_invoice` → `send_invoice` (or `create_and_send_invoice` for the one-shot path)
 
 ### Financial Queries
 
@@ -152,6 +154,8 @@ mcp-lexoffice.example.com {
 | `get_contact` | Get full contact details with deep link. |
 | `create_contact` | Create a company or person contact with named parameters. |
 | `update_contact` | Update contact fields with optimistic locking (version). |
+| `find_or_create_contact` | Idempotent lookup-or-create by name/email — returns existing match or creates a new contact. |
+| `get_contact_invoices` | List the invoices belonging to a given contact. |
 
 ### Quotations (Angebote)
 
@@ -160,6 +164,21 @@ mcp-lexoffice.example.com {
 | `create_draft_quotation` | Create a draft quotation with the same interface as invoices. |
 | `finalize_quotation` | Finalize a quotation — assigns Angebotsnummer. |
 | `pursue_quotation_to_invoice` | Convert a finalized quotation to a draft invoice (Angebot → Rechnung). |
+| `convert_quotation_and_send` | One-shot: convert a quotation to an invoice, finalize, and send. **Irreversible.** |
+| `list_quotations` | List quotations with status filter. |
+
+### Recurring Templates (Wiederkehrende Rechnungen)
+
+| Tool | Description |
+|------|-------------|
+| `list_recurring_templates` | List configured recurring invoice templates. |
+| `get_recurring_template` | Get a recurring template's details. |
+
+### Credit Notes (Gutschriften)
+
+| Tool | Description |
+|------|-------------|
+| `create_credit_note` | Create a credit note (Gutschrift), optionally linked to a contact. |
 
 ### Dunnings (Mahnungen)
 
@@ -177,20 +196,42 @@ mcp-lexoffice.example.com {
 | `get_article` | Get article details. |
 | `update_article` | Update article with optimistic locking. |
 
-### Voucher Upload
+### Vouchers (Belege)
 
 | Tool | Description |
 |------|-------------|
-| `upload_voucher` | Upload a bill/receipt (PDF, PNG, JPG) to Lexoffice "Zu prüfen". Max 5MB. |
+| `upload_voucher` | Upload a raw bill/receipt file (PDF, PNG, JPG) to Lexoffice Beleg-Eingang ("Zu prüfen"). Max 5MB. |
+| `create_voucher` | Create a structured purchase invoice (amount + vendor + category), optional PDF attach and read-back. |
+| `attach_voucher_file` | Attach a file to an existing voucher (multipart upload). |
+| `get_voucher` | Get a voucher's details. |
+| `update_voucher` | Update a voucher with optimistic locking. |
+| `list_vouchers` | Generic voucher list query by type and status. |
+| `list_posting_categories` | List Buchungskonten (posting categories) for voucher categorization. |
 
 ### Utilities
 
 | Tool | Description |
 |------|-------------|
 | `get_profile` | Get organization profile (company name, tax settings). |
-| `list_vouchers` | Generic voucher list query by type and status. |
 | `list_payment_conditions` | List configured payment terms. |
 | `list_countries` | List countries with tax classification. |
+
+## Resources & Prompts
+
+In addition to tools, the server exposes MCP **resources** (reference/context data the model can
+pull without a tool call) under the `lexoffice://` scheme:
+
+- `lexoffice://service-catalog` — standard offerings + pricing (static)
+- `lexoffice://countries`, `lexoffice://posting-categories`, `lexoffice://payment-conditions` — live API reference data
+- `lexoffice://tax-config` — auto-detected tax regime + default VAT rate
+- `lexoffice://status` — service name, version, uptime (mirrors `/health`)
+- `lexoffice://contacts/{contact_id}/invoices` — per-contact invoice list (resource template)
+
+And guided-workflow **prompts**:
+
+- `monthly_close` — overview → overdue invoices → suggested dunnings
+- `dunning_run` — find overdue open invoices and walk creating Mahnungen
+- `capture_receipt` — Belegfänger flow: `find_or_create_contact` → `create_voucher` (+ optional PDF)
 
 ## Tax Configuration
 
@@ -220,8 +261,8 @@ pip install -e ".[test]"
 python -m pytest tests/ -v
 ```
 
-The test suite includes 215 tests covering:
-- All 27 MCP tools with parameter variations
+The test suite includes 297 tests covering:
+- All 41 MCP tools with parameter variations
 - Client HTTP methods with respx mocks
 - 429 retry logic and rate limiting
 - Error propagation (400, 401, 403, 404, 409, 422, 500)
@@ -237,11 +278,11 @@ mcp-lexoffice/
   mcp_lexoffice/
     __init__.py
     client.py          # Async HTTP client (httpx, rate limiting, 429 retry)
-    server.py           # FastMCP 3 server with 27 tools
+    server.py           # FastMCP 3 server with 41 tools
   tests/
     conftest.py         # Shared fixtures (respx mock, test client)
     test_client.py      # Client unit tests (80 tests)
-    test_server.py      # Server/tool unit tests (124 tests)
+    test_server.py      # Server/tool unit tests (217 tests)
   .env.example          # Environment variable template
   docker-compose.yml    # Docker Compose for deployment
   Dockerfile            # Python 3.13-slim with health check
@@ -251,8 +292,9 @@ mcp-lexoffice/
 
 ## Dependencies
 
-- **[FastMCP](https://github.com/jlowin/fastmcp)** >= 3.0.0 — MCP server framework
-- **[httpx](https://www.python-httpx.org/)** >= 0.27.0 — Async HTTP client
+- **[FastMCP](https://github.com/jlowin/fastmcp)** >= 3.4.2, < 4.0.0 — MCP server framework
+- **[httpx](https://www.python-httpx.org/)** >= 0.28.0 — Async HTTP client
+- **[pydantic](https://docs.pydantic.dev/)** >= 2.10 / **pydantic-settings** >= 2.12 — typed models & settings
 - **[python-dotenv](https://github.com/theskumar/python-dotenv)** >= 1.0.0 — `.env` file loading
 
 ## License

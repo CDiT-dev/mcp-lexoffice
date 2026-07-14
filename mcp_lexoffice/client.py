@@ -4,46 +4,33 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
-import subprocess
 from typing import Any
 
 import httpx
 from dotenv import load_dotenv
+
+from .config import get_settings
 
 load_dotenv()
 
 BASE_URL = "https://api.lexoffice.io/v1"
 
 
-def _resolve_api_key() -> str:
-    key = os.environ.get("LEXOFFICE_API_KEY", "")
-    if key.startswith("op://"):
-        result = subprocess.run(
-            ["op", "read", key],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(f"1Password CLI failed: {result.stderr.strip()}")
-        return result.stdout.strip()
-    return key
-
-
 class LexofficeClient:
     def __init__(self) -> None:
-        api_key = _resolve_api_key()
+        api_key = get_settings().lexoffice_api_key.get_secret_value()
         if not api_key:
             raise RuntimeError(
-                "LEXOFFICE_API_KEY must be set (raw key or op:// reference)"
+                "LEXOFFICE_API_KEY must be set (raw token injected via env or .env)"
             )
         self._client = httpx.AsyncClient(
             base_url=BASE_URL,
             headers={
                 "Authorization": f"Bearer {api_key}",
                 "Accept": "application/json",
-                "Content-Type": "application/json",
+                # No default Content-Type: httpx sets application/json for json= calls and
+                # multipart/form-data (with boundary) for files= uploads. A hardcoded default
+                # here shadows the multipart boundary and breaks /files uploads (Lexoffice 500).
             },
             timeout=30.0,
         )
@@ -57,6 +44,7 @@ class LexofficeClient:
         params: dict[str, Any] | None = None,
         json: dict[str, Any] | None = None,
         content: bytes | None = None,
+        files: dict[str, Any] | None = None,
         accept: str | None = None,
         content_type: str | None = None,
     ) -> httpx.Response:
@@ -64,16 +52,18 @@ class LexofficeClient:
             headers: dict[str, str] = {}
             if accept:
                 headers["Accept"] = accept
-            if content_type:
+            # Don't set Content-Type when uploading files: httpx must set
+            # multipart/form-data with its own boundary.
+            if content_type and files is None:
                 headers["Content-Type"] = content_type
             resp = await self._client.request(
-                method, path, params=params, json=json, content=content, headers=headers
+                method, path, params=params, json=json, content=content, files=files, headers=headers
             )
             if resp.status_code == 429:
                 retry_after = float(resp.headers.get("Retry-After", "1"))
                 await asyncio.sleep(retry_after)
                 resp = await self._client.request(
-                    method, path, params=params, json=json, content=content, headers=headers
+                    method, path, params=params, json=json, content=content, files=files, headers=headers
                 )
             if resp.status_code >= 400:
                 try:
@@ -154,6 +144,24 @@ class LexofficeClient:
     async def get_invoice(self, invoice_id: str) -> dict:
         resp = await self._request("GET", f"/invoices/{invoice_id}")
         return resp.json()
+
+    async def get_invoice_or_voucher(self, resource_id: str) -> dict:
+        """Try /invoices/{id} first; on 404, fall back to /vouchers/{id}.
+
+        The voucherlist endpoint can return IDs for both Invoice API objects
+        and bookkeeping vouchers (Belege). This method resolves either."""
+        try:
+            resp = await self._request("GET", f"/invoices/{resource_id}")
+            result = resp.json()
+            result["_resolvedVia"] = "invoices"
+            return result
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code != 404:
+                raise
+        resp = await self._request("GET", f"/vouchers/{resource_id}")
+        result = resp.json()
+        result["_resolvedVia"] = "vouchers"
+        return result
 
     async def finalize_invoice(self, invoice_id: str) -> dict:
         resp = await self._request("GET", f"/invoices/{invoice_id}")
@@ -276,6 +284,7 @@ class LexofficeClient:
         voucher_type: str,
         *,
         voucher_status: str | None = None,
+        contact_id: str | None = None,
         page: int = 0,
         size: int = 100,
     ) -> dict:
@@ -285,7 +294,59 @@ class LexofficeClient:
             "voucherType": voucher_type,
         }
         params["voucherStatus"] = voucher_status or "any"
+        if contact_id:
+            params["contactId"] = contact_id
         resp = await self._request("GET", "/voucherlist", params=params)
+        return resp.json()
+
+    async def get_voucher(self, voucher_id: str) -> dict:
+        resp = await self._request("GET", f"/vouchers/{voucher_id}")
+        return resp.json()
+
+    async def update_voucher(self, voucher_id: str, data: dict) -> dict:
+        resp = await self._request("PUT", f"/vouchers/{voucher_id}", json=data)
+        return resp.json()
+
+    async def create_voucher(self, data: dict) -> dict:
+        """Create a structured bookkeeping voucher (Beleg) via POST /v1/vouchers.
+
+        Unlike upload_file (which lands a raw, un-OCR'd file in Beleg-Eingang), this
+        creates a voucher with persisted amount, tax, and contact — the structured
+        object Lexoffice can use for bank-matching."""
+        resp = await self._request("POST", "/vouchers", json=data)
+        return resp.json()
+
+    async def attach_voucher_file(
+        self, voucher_id: str, file_bytes: bytes, file_name: str
+    ) -> dict:
+        """Attach a file (the original Beleg) to an existing voucher.
+
+        POST /v1/vouchers/{id}/files expects multipart/form-data with a `file` part."""
+        import mimetypes
+
+        mime_type = mimetypes.guess_type(file_name)[0] or "application/pdf"
+        resp = await self._request(
+            "POST",
+            f"/vouchers/{voucher_id}/files",
+            files={"file": (file_name, file_bytes, mime_type)},
+            accept="application/json",
+        )
+        return resp.json()
+
+    async def list_posting_categories(self) -> list[dict]:
+        """List posting categories (Buchungskonten) with their UUIDs, type (income/outgo),
+        and contactRequired/splitAllowed flags."""
+        resp = await self._request("GET", "/posting-categories")
+        return resp.json()
+
+    # ── Recurring Templates ────────────────────────────────────────
+
+    async def list_recurring_templates(self) -> list[dict]:
+        resp = await self._request("GET", "/recurring-templates")
+        return resp.json()
+
+    async def get_recurring_template(self, template_id: str) -> dict:
+        resp = await self._request("GET", f"/recurring-templates/{template_id}")
         return resp.json()
 
     # ── Payments ─────────────────────────────────────────────────────
@@ -297,12 +358,16 @@ class LexofficeClient:
     # ── Files ────────────────────────────────────────────────────────
 
     async def upload_file(self, file_bytes: bytes, file_name: str, file_type: str = "voucher") -> dict:
+        # Lexoffice /v1/files requires multipart/form-data with a `file` part carrying the
+        # filename and a part-level Content-Type. httpx builds this from the files= tuple.
+        import mimetypes
+
+        mime_type = mimetypes.guess_type(file_name)[0] or "application/pdf"
         resp = await self._request(
             "POST",
             "/files",
             params={"type": file_type},
-            content=file_bytes,
-            content_type="application/octet-stream",
+            files={"file": (file_name, file_bytes, mime_type)},
             accept="application/json",
         )
         return resp.json()

@@ -1,8 +1,108 @@
 # Changelog
 
-## [0.2.4] - 2026-05-21
+## [0.3.15] - 2026-07-08
 
-- fix: omit paymentConditions so Lexware applies its own default
+- openspec: reference consolidated cdit store
+
+
+## [0.3.14] - 2026-07-08
+
+- fix: fastmcp>=3.4.3 + allowed_hosts=["*"] — 3.4.3 rejects non-localhost Host with 421 (edge CF-Access/Tailscale gated)
+
+
+## [0.3.13] - 2026-06-30
+
+- docs: sync internal README to current surface (41 tools, 297 tests)
+
+
+## [0.3.12] - 2026-06-10
+
+- feat(lexoffice): tags + financial-overview pagination + contact-invoices resource template (shelf) (#18)
+
+
+## [0.3.11] - 2026-06-10
+
+- feat(lexoffice): unify ToolError + type remaining returns (pass 3) (#17)
+
+
+## [0.3.9] - 2026-06-10
+
+- feat: fastmcp 3.4.2 uplift — annotations, structured output, resources, prompts, context (#16)
+
+
+## [0.3.8] - 2026-05-29
+
+- fix(create_voucher): default purchase category to 'Lizenzen und Konzessionen'
+
+
+## [0.3.7] - 2026-05-29
+
+- fix(create_voucher): fall back to 0% VAT when posting category rejects the rate
+
+
+## [0.3.6] - 2026-05-29
+
+- fix: derive __version__ from package metadata to stop health version drift
+
+
+## [0.3.5] - 2026-05-29
+
+- feat(CDI-1164): add structured purchase voucher creation for Belegfänger enrichment
+
+
+## [0.3.4] - 2026-05-29
+
+- fix: upload files as multipart/form-data (Lexoffice /files 500)
+
+
+## [0.3.3] - 2026-05-25
+
+- feat: add recurring template tools + invoice voucherType fix
+
+
+## [0.3.2] - 2026-05-25
+
+- fix(CDI-1160): query both salesinvoice and invoice voucherTypes
+
+
+## [0.3.1] - 2026-05-25
+
+- feat: v0.3.0 — capability tools, LLM ergonomics overhaul
+
+
+## [0.2.8] - 2026-04-20
+
+- ci(deps): enable Dependabot weekly updates
+
+
+## [0.2.7] - 2026-04-19
+
+- refactor(config): add Settings with SecretStr, remove op:// subprocess
+
+
+## [0.2.6] - 2026-04-18
+
+- feat(reliability): stateless_http + /health + fail-fast + FastMCP 3.2.4
+
+
+## [0.2.5] - 2026-04-16
+
+- Add update_voucher tool for fixing VAT rates
+
+
+## [0.2.4] - 2026-04-15
+
+- Fix list_expenses: include paid status in default filter
+
+
+## [0.2.3] - 2026-04-15
+
+- Add get_voucher endpoint for VAT line item details
+
+
+## [0.2.2] - 2026-04-09
+
+- fix: lowercase Docker image tags in release CI
 
 
 ## [0.2.0] - 2026-04-09

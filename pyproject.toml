@@ -1,20 +1,18 @@
-[build-system]
-requires = ["setuptools>=61"]
-build-backend = "setuptools.build_meta"
-
 [project]
 name = "mcp-lexoffice"
-version = "0.2.5"
+version = "0.3.16"
 description = "MCP server for Lexware Office (formerly Lexoffice) — invoices, contacts, and accounting"
 requires-python = ">=3.11"
 dependencies = [
-    "fastmcp>=3.2.2",
+    "fastmcp>=3.4.3,<4.0.0",
     "httpx>=0.28.0",
+    "pydantic>=2.10",
+    "pydantic-settings>=2.12.0",
     "python-dotenv>=1.0.0",
+    # Security floors (transitive deps of fastmcp; pinned to address CVEs)
+    "authlib>=1.7.0",            # GHSA: CSRF in token cache handling
+    "python-multipart>=0.0.27",  # GHSA: DoS via unbounded multipart headers
 ]
-
-[tool.setuptools.packages.find]
-include = ["mcp_lexoffice*"]
 
 [project.optional-dependencies]
 test = [
@@ -25,6 +23,13 @@ test = [
 
 [project.scripts]
 mcp-lexoffice = "mcp_lexoffice.server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["mcp_lexoffice"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

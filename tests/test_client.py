@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from unittest.mock import patch
 
@@ -10,62 +11,16 @@ import httpx
 import pytest
 import respx
 
-from mcp_lexoffice.client import LexofficeClient, _resolve_api_key, BASE_URL
+from mcp_lexoffice.client import LexofficeClient, BASE_URL
+from mcp_lexoffice.config import get_settings
 
 
-# ── API key resolution ───────────────────────────────────────────────
-
-
-class TestResolveApiKey:
-    def test_raw_key(self):
-        with patch.dict(os.environ, {"LEXOFFICE_API_KEY": "raw-key-123"}):
-            assert _resolve_api_key() == "raw-key-123"
-
-    def test_empty_key(self):
-        with patch.dict(os.environ, {"LEXOFFICE_API_KEY": ""}):
-            assert _resolve_api_key() == ""
-
-    def test_missing_key(self):
-        with patch.dict(os.environ, {}, clear=True):
-            assert _resolve_api_key() == ""
-
-    def test_op_reference_success(self):
-        with (
-            patch.dict(os.environ, {"LEXOFFICE_API_KEY": "op://vault/item/field"}),
-            patch("mcp_lexoffice.client.subprocess.run") as mock_run,
-        ):
-            mock_run.return_value.returncode = 0
-            mock_run.return_value.stdout = "  resolved-key  \n"
-            assert _resolve_api_key() == "resolved-key"
-            mock_run.assert_called_once_with(
-                ["op", "read", "op://vault/item/field"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-
-    def test_op_reference_failure(self):
-        with (
-            patch.dict(os.environ, {"LEXOFFICE_API_KEY": "op://vault/item/field"}),
-            patch("mcp_lexoffice.client.subprocess.run") as mock_run,
-        ):
-            mock_run.return_value.returncode = 1
-            mock_run.return_value.stderr = "not signed in"
-            with pytest.raises(RuntimeError, match="1Password CLI failed"):
-                _resolve_api_key()
-
-    def test_op_reference_strips_whitespace(self):
-        with (
-            patch.dict(os.environ, {"LEXOFFICE_API_KEY": "op://v/i/f"}),
-            patch("mcp_lexoffice.client.subprocess.run") as mock_run,
-        ):
-            mock_run.return_value.returncode = 0
-            mock_run.return_value.stdout = "\n\t  secret-key \n\n"
-            assert _resolve_api_key() == "secret-key"
-
-    def test_non_op_prefix_returned_as_is(self):
-        with patch.dict(os.environ, {"LEXOFFICE_API_KEY": "opaque-key-not-op-ref"}):
-            assert _resolve_api_key() == "opaque-key-not-op-ref"
+@pytest.fixture(autouse=True)
+def _clear_settings_cache():
+    """Ensure get_settings() picks up patched env vars in each test."""
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
 
 
 class TestClientInit:
@@ -89,10 +44,13 @@ class TestClientInit:
             c = LexofficeClient()
             assert c._client.headers["Accept"] == "application/json"
 
-    def test_content_type_header_set(self):
+    def test_no_default_content_type_header(self):
+        # The client must NOT hardcode a default Content-Type: httpx sets application/json
+        # for json= calls and multipart/form-data (with boundary) for files= uploads. A
+        # hardcoded default shadows the multipart boundary and breaks /files uploads.
         with patch.dict(os.environ, {"LEXOFFICE_API_KEY": "my-key"}):
             c = LexofficeClient()
-            assert c._client.headers["Content-Type"] == "application/json"
+            assert "Content-Type" not in c._client.headers
 
     def test_semaphore_has_value_2(self):
         with patch.dict(os.environ, {"LEXOFFICE_API_KEY": "my-key"}):
@@ -374,11 +332,54 @@ async def test_upload_file_custom_type(client, mock_api):
     assert "type=salesinvoice" in url
 
 
-async def test_upload_file_content_type_header(client, mock_api):
+async def test_upload_file_multipart(client, mock_api):
     route = mock_api.post("/files").respond(200, json={"id": "f-003"})
-    await client.upload_file(b"data", "file.pdf")
+    await client.upload_file(b"%PDF-1.4 data", "file.pdf")
     req = route.calls[0].request
-    assert req.headers.get("content-type") == "application/octet-stream"
+    # Lexoffice /files requires multipart/form-data (with boundary), not octet-stream.
+    assert req.headers.get("content-type", "").startswith("multipart/form-data")
+    body = req.content
+    assert b'name="file"' in body
+    assert b'filename="file.pdf"' in body
+    assert b"application/pdf" in body  # part-level content type from the mime guess
+    assert b"%PDF-1.4 data" in body
+
+
+# ── Structured vouchers (CDI-1164) ───────────────────────────────────
+
+
+async def test_create_voucher(client, mock_api):
+    route = mock_api.post("/vouchers").respond(200, json={"id": "v-001"})
+    data = {"type": "purchaseinvoice", "totalGrossAmount": 119.0}
+    result = await client.create_voucher(data)
+    assert result["id"] == "v-001"
+    sent = json.loads(route.calls[0].request.content)
+    assert sent["type"] == "purchaseinvoice"
+
+
+async def test_attach_voucher_file(client, mock_api):
+    route = mock_api.post("/vouchers/v-001/files").respond(
+        200, json={"id": "file-1", "voucherId": "v-001"}
+    )
+    result = await client.attach_voucher_file("v-001", b"%PDF-1.4 data", "invoice.pdf")
+    assert result["id"] == "file-1"
+    assert result["voucherId"] == "v-001"
+
+
+async def test_attach_voucher_file_multipart(client, mock_api):
+    route = mock_api.post("/vouchers/v-001/files").respond(200, json={"id": "file-1"})
+    await client.attach_voucher_file("v-001", b"%PDF-1.4 data", "invoice.pdf")
+    req = route.calls[0].request
+    assert req.headers.get("content-type", "").startswith("multipart/form-data")
+
+
+async def test_list_posting_categories(client, mock_api):
+    mock_api.get("/posting-categories").respond(
+        200, json=[{"id": "c-1", "name": "Reise MA", "type": "outgo"}]
+    )
+    result = await client.list_posting_categories()
+    assert result[0]["id"] == "c-1"
+    assert result[0]["type"] == "outgo"
 
 
 # ── Payment Conditions ───────────────────────────────────────────────
@@ -653,6 +654,47 @@ async def test_404_propagates(client, mock_api):
     mock_api.get("/invoices/nonexistent").respond(404, json={"message": "Not found"})
     with pytest.raises(httpx.HTTPStatusError) as exc_info:
         await client.get_invoice("nonexistent")
+    assert exc_info.value.response.status_code == 404
+
+
+# ── get_invoice_or_voucher fallback ─────────────────────────────────
+
+
+async def test_get_invoice_or_voucher_resolves_invoice(client, mock_api):
+    """When /invoices/{id} succeeds, return invoice data with _resolvedVia=invoices."""
+    mock_api.get("/invoices/inv-001").respond(
+        200, json={"id": "inv-001", "voucherStatus": "open"}
+    )
+    result = await client.get_invoice_or_voucher("inv-001")
+    assert result["id"] == "inv-001"
+    assert result["_resolvedVia"] == "invoices"
+
+
+async def test_get_invoice_or_voucher_falls_back_to_voucher(client, mock_api):
+    """When /invoices/{id} returns 404, fall back to /vouchers/{id}."""
+    mock_api.get("/invoices/beleg-001").respond(404, json={"message": "Not found"})
+    mock_api.get("/vouchers/beleg-001").respond(
+        200, json={"id": "beleg-001", "type": "salesinvoice", "voucherStatus": "unchecked"}
+    )
+    result = await client.get_invoice_or_voucher("beleg-001")
+    assert result["id"] == "beleg-001"
+    assert result["_resolvedVia"] == "vouchers"
+
+
+async def test_get_invoice_or_voucher_propagates_non_404(client, mock_api):
+    """Non-404 errors from /invoices/{id} should propagate, not fall back."""
+    mock_api.get("/invoices/inv-403").respond(403, json={"message": "Forbidden"})
+    with pytest.raises(httpx.HTTPStatusError) as exc_info:
+        await client.get_invoice_or_voucher("inv-403")
+    assert exc_info.value.response.status_code == 403
+
+
+async def test_get_invoice_or_voucher_both_404(client, mock_api):
+    """When both /invoices and /vouchers return 404, the voucher 404 propagates."""
+    mock_api.get("/invoices/gone").respond(404, json={"message": "Not found"})
+    mock_api.get("/vouchers/gone").respond(404, json={"message": "Not found"})
+    with pytest.raises(httpx.HTTPStatusError) as exc_info:
+        await client.get_invoice_or_voucher("gone")
     assert exc_info.value.response.status_code == 404
 
 

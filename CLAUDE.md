@@ -89,6 +89,7 @@ Reference/context data exposed as resources so the model can pull it without a t
 - All tools return deep links to Lexoffice UI
 - Base URL migrating from lexoffice.io to lexware.io (both work currently)
 - **Structured vouchers** (`POST /v1/vouchers`): each voucherItem needs a `categoryId` (Buchungskonto — discover via `list_posting_categories`; `create_voucher` auto-resolves a default `outgo` category if none given). Lexoffice **rejects `taxType=net` + `voucherStatus=unchecked`** — use `gross` to land a voucher in "Zu prüfen", or `open` for net. Only `open` and `unchecked` statuses are writeable. File attach is `POST /v1/vouchers/{id}/files` (multipart field `file`).
+- **Contact-linked vouchers** (`address.contactId`): send ONLY `contactId` — any extra address field flips Lexware into manual-address mode and the billing address + Ansprechpartner stay blank. Both render **from the contact record**, so contacts need a billing address and (for companies) a `contactPersons` entry — create/maintain via `create_contact`/`update_contact`/`find_or_create_contact` (street/zip_code/city + `contact_person_*` params). Draft tools attach a `warning` when the linked contact is incomplete; `create_and_send_invoice` refuses to send without a billing address.
 
 ## Testing
 ```bash

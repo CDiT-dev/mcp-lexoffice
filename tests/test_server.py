@@ -2769,3 +2769,312 @@ async def test_contact_invoices_resource_is_error_path_safe():
     parsed = json.loads(await contact_invoices_resource("contact-123", ctx))
     assert "error" in parsed
     assert parsed["contactId"] == "contact-123"
+
+
+# ── Contact address & Ansprechpartner creation/maintenance ──────────
+# Invoices/quotations linked via contact_id render the billing address and primary
+# contact person FROM THE CONTACT RECORD — these tests cover creating/maintaining
+# that data and the warnings/guards when it's missing.
+
+_CONTACT_COMPLETE = {
+    "id": "c-acme",
+    "version": 1,
+    "company": {
+        "name": "Acme GmbH",
+        "contactPersons": [{"firstName": "Max", "lastName": "Muster", "primary": True}],
+    },
+    "addresses": {"billing": [{"street": "Hauptstr. 1", "zip": "10115", "city": "Berlin", "countryCode": "DE"}]},
+}
+
+_CONTACT_BARE = {
+    "id": "c-bare",
+    "version": 1,
+    "company": {"name": "Bare GmbH"},
+}
+
+
+async def test_create_contact_with_contact_person():
+    from mcp_lexoffice.server import create_contact
+
+    ctx = make_ctx({"create_contact": {"id": "c-cp"}})
+    await create_contact(
+        ctx,
+        company_name="Acme GmbH",
+        contact_person_first_name="Erika",
+        contact_person_last_name="Beispiel",
+        contact_person_email="erika@acme.de",
+        contact_person_phone="+49 30 123",
+    )
+    call_data = ctx.lifespan_context["lexoffice"].create_contact.call_args[0][0]
+    persons = call_data["company"]["contactPersons"]
+    assert len(persons) == 1
+    assert persons[0]["firstName"] == "Erika"
+    assert persons[0]["lastName"] == "Beispiel"
+    assert persons[0]["emailAddress"] == "erika@acme.de"
+    assert persons[0]["phoneNumber"] == "+49 30 123"
+    assert persons[0]["primary"] is True
+
+
+async def test_create_contact_contact_person_requires_company():
+    from mcp_lexoffice.server import create_contact
+
+    ctx = make_ctx({})
+    with pytest.raises(ToolError) as exc:
+        await create_contact(ctx, first_name="Max", last_name="Muster", contact_person_first_name="Erika")
+    assert "company contacts" in str(exc.value)
+
+
+async def test_create_contact_with_phone():
+    from mcp_lexoffice.server import create_contact
+
+    ctx = make_ctx({"create_contact": {"id": "c-ph"}})
+    await create_contact(ctx, company_name="Acme GmbH", phone="+49 30 555")
+    call_data = ctx.lifespan_context["lexoffice"].create_contact.call_args[0][0]
+    assert call_data["phoneNumbers"]["business"] == ["+49 30 555"]
+
+
+async def test_update_contact_adds_billing_address():
+    from mcp_lexoffice.server import update_contact
+
+    existing = {"id": "c-1", "version": 2, "company": {"name": "Acme"}}
+    ctx = make_ctx({"get_contact": existing, "update_contact": {"id": "c-1"}})
+    await update_contact(ctx, contact_id="c-1", street="Neue Str. 5", zip_code="80331", city="München")
+    sent = ctx.lifespan_context["lexoffice"].update_contact.call_args[0][1]
+    billing = sent["addresses"]["billing"][0]
+    assert billing == {"street": "Neue Str. 5", "zip": "80331", "city": "München", "countryCode": "DE"}
+
+
+async def test_update_contact_merges_existing_billing_address():
+    """Partial address edits keep unspecified fields from the existing billing address."""
+    from mcp_lexoffice.server import update_contact
+
+    existing = {
+        "id": "c-1", "version": 2, "company": {"name": "Acme"},
+        "addresses": {"billing": [{"street": "Alt 1", "zip": "10115", "city": "Berlin", "countryCode": "AT"}]},
+    }
+    ctx = make_ctx({"get_contact": existing, "update_contact": {"id": "c-1"}})
+    await update_contact(ctx, contact_id="c-1", street="Neu 2")
+    sent = ctx.lifespan_context["lexoffice"].update_contact.call_args[0][1]
+    billing = sent["addresses"]["billing"][0]
+    assert billing["street"] == "Neu 2"
+    assert billing["zip"] == "10115"
+    assert billing["city"] == "Berlin"
+    assert billing["countryCode"] == "AT"  # kept, not reset to DE
+
+
+async def test_update_contact_adds_contact_person():
+    from mcp_lexoffice.server import update_contact
+
+    existing = {"id": "c-1", "version": 2, "company": {"name": "Acme"}}
+    ctx = make_ctx({"get_contact": existing, "update_contact": {"id": "c-1"}})
+    await update_contact(
+        ctx, contact_id="c-1",
+        contact_person_first_name="Erika", contact_person_last_name="Beispiel",
+    )
+    sent = ctx.lifespan_context["lexoffice"].update_contact.call_args[0][1]
+    persons = sent["company"]["contactPersons"]
+    assert len(persons) == 1
+    assert persons[0]["firstName"] == "Erika"
+    assert persons[0]["primary"] is True
+
+
+async def test_update_contact_merges_primary_contact_person():
+    """Contact-person edits merge into the existing primary person, preserving other fields
+    and other (non-primary) persons."""
+    from mcp_lexoffice.server import update_contact
+
+    existing = {
+        "id": "c-1", "version": 2,
+        "company": {"name": "Acme", "contactPersons": [
+            {"firstName": "Ignore", "lastName": "Me", "primary": False},
+            {"firstName": "Max", "lastName": "Muster", "emailAddress": "max@acme.de", "primary": True},
+        ]},
+    }
+    ctx = make_ctx({"get_contact": existing, "update_contact": {"id": "c-1"}})
+    await update_contact(ctx, contact_id="c-1", contact_person_email="neu@acme.de")
+    sent = ctx.lifespan_context["lexoffice"].update_contact.call_args[0][1]
+    persons = sent["company"]["contactPersons"]
+    assert len(persons) == 2
+    assert persons[0] == {"firstName": "Ignore", "lastName": "Me", "primary": False}
+    assert persons[1]["firstName"] == "Max"  # preserved
+    assert persons[1]["emailAddress"] == "neu@acme.de"  # updated
+    assert persons[1]["primary"] is True
+
+
+async def test_update_contact_contact_person_requires_company():
+    from mcp_lexoffice.server import update_contact
+
+    existing = {"id": "c-1", "version": 2, "person": {"firstName": "Max", "lastName": "Muster"}}
+    ctx = make_ctx({"get_contact": existing})
+    with pytest.raises(ToolError) as exc:
+        await update_contact(ctx, contact_id="c-1", contact_person_first_name="Erika")
+    assert "company contacts" in str(exc.value)
+
+
+async def test_update_contact_phone():
+    from mcp_lexoffice.server import update_contact
+
+    existing = {"id": "c-1", "version": 2, "company": {"name": "Acme"}}
+    ctx = make_ctx({"get_contact": existing, "update_contact": {"id": "c-1"}})
+    await update_contact(ctx, contact_id="c-1", phone="+49 30 777")
+    sent = ctx.lifespan_context["lexoffice"].update_contact.call_args[0][1]
+    assert sent["phoneNumbers"]["business"] == ["+49 30 777"]
+
+
+async def test_find_or_create_contact_creates_with_address_and_person():
+    from mcp_lexoffice.server import find_or_create_contact
+
+    ctx = make_ctx({
+        "filter_contacts": {"content": []},
+        "create_contact": {"id": "c-new"},
+    })
+    result = await find_or_create_contact(
+        ctx, name="Neue GmbH",
+        street="Weg 3", zip_code="50667", city="Köln",
+        contact_person_first_name="Erika", contact_person_last_name="Beispiel",
+    )
+    parsed = as_dict(result)
+    assert parsed["_action"] == "created_new"
+    call_data = ctx.lifespan_context["lexoffice"].create_contact.call_args[0][0]
+    billing = call_data["addresses"]["billing"][0]
+    assert billing["street"] == "Weg 3"
+    assert billing["countryCode"] == "DE"
+    persons = call_data["company"]["contactPersons"]
+    assert persons[0]["firstName"] == "Erika"
+    assert persons[0]["primary"] is True
+
+
+async def test_find_or_create_contact_person_rejects_contact_person():
+    from mcp_lexoffice.server import find_or_create_contact
+
+    ctx = make_ctx({"filter_contacts": {"content": []}})
+    with pytest.raises(ToolError) as exc:
+        await find_or_create_contact(
+            ctx, name="Max Muster", first_name="Max", last_name="Muster",
+            contact_person_first_name="Erika",
+        )
+    assert "company contacts" in str(exc.value)
+
+
+async def test_create_draft_invoice_warns_on_bare_linked_contact():
+    """A linked contact without billing address / Ansprechpartner produces a warning on the
+    result — the voucher would otherwise silently render a bare recipient name."""
+    from mcp_lexoffice.server import create_draft_invoice
+
+    ctx = make_ctx({"create_invoice": {"id": "inv-1"}, "get_contact": dict(_CONTACT_BARE)})
+    result = await create_draft_invoice(
+        ctx, recipient_name="Bare GmbH",
+        line_items=[{"name": "A", "unit_price": 1}],
+        contact_id="c-bare",
+    )
+    parsed = as_dict(result)
+    assert "billing address" in parsed["warning"]
+    assert "Ansprechpartner" in parsed["warning"]
+    assert "update_contact" in parsed["warning"]
+
+
+async def test_create_draft_invoice_no_warning_on_complete_contact():
+    from mcp_lexoffice.server import create_draft_invoice
+
+    ctx = make_ctx({"create_invoice": {"id": "inv-2"}, "get_contact": dict(_CONTACT_COMPLETE)})
+    result = await create_draft_invoice(
+        ctx, recipient_name="Acme GmbH",
+        line_items=[{"name": "A", "unit_price": 1}],
+        contact_id="c-acme",
+    )
+    parsed = as_dict(result)
+    assert parsed.get("warning") is None
+
+
+async def test_create_draft_invoice_warning_fetch_failure_is_swallowed():
+    """The completeness check is diagnostics only — a failing contact fetch must not
+    break invoice creation."""
+    from mcp_lexoffice.server import create_draft_invoice
+
+    client = AsyncMock()
+    client.create_invoice.return_value = {"id": "inv-3"}
+    client.get_contact.side_effect = RuntimeError("boom")
+    ctx = FakeContext(client)
+    ctx.lifespan_context["tax_config"] = {"tax_type": "vatfree", "default_rate": 0}
+    result = await create_draft_invoice(
+        ctx, recipient_name="X",
+        line_items=[{"name": "A", "unit_price": 1}],
+        contact_id="c-x",
+    )
+    parsed = as_dict(result)
+    assert parsed["id"] == "inv-3"
+    assert parsed.get("warning") is None
+
+
+async def test_create_and_send_invoice_blocks_on_missing_billing_address():
+    """The one-shot finalize+send path is irreversible — refuse up front when the linked
+    contact has no billing address instead of sending a legally incomplete invoice."""
+    from mcp_lexoffice.server import create_and_send_invoice
+
+    ctx = make_ctx({"get_contact": dict(_CONTACT_BARE)})
+    with pytest.raises(ToolError) as exc:
+        await create_and_send_invoice(
+            ctx, recipient_name="Bare GmbH", recipient_email="x@bare.de",
+            line_items=[{"name": "A", "unit_price": 1}],
+            contact_id="c-bare",
+        )
+    assert "billing address" in str(exc.value)
+    assert ctx.lifespan_context["lexoffice"].create_invoice.call_count == 0
+
+
+async def test_create_and_send_invoice_proceeds_on_complete_contact():
+    from mcp_lexoffice.server import create_and_send_invoice
+
+    ctx = make_ctx({
+        "get_contact": dict(_CONTACT_COMPLETE),
+        "create_invoice": {"id": "inv-4"},
+        "finalize_invoice": {},
+        "send_invoice": None,
+        "get_invoice": {"id": "inv-4", "voucherNumber": "RE-1", "totalPrice": {"totalNetAmount": 100}},
+    })
+    result = await create_and_send_invoice(
+        ctx, recipient_name="Acme GmbH", recipient_email="x@acme.de",
+        line_items=[{"name": "A", "unit_price": 100}],
+        contact_id="c-acme",
+    )
+    parsed = as_dict(result)
+    assert parsed["status"] == "sent"
+
+
+async def test_create_draft_quotation_warns_on_bare_linked_contact():
+    from mcp_lexoffice.server import create_draft_quotation
+
+    ctx = make_ctx({"create_quotation": {"id": "q-1"}, "get_contact": dict(_CONTACT_BARE)})
+    result = await create_draft_quotation(
+        ctx, recipient_name="Bare GmbH",
+        line_items=[{"name": "A", "unit_price": 1}],
+        contact_id="c-bare",
+    )
+    parsed = as_dict(result)
+    assert "billing address" in parsed["warning"]
+
+
+async def test_create_credit_note_warns_on_bare_linked_contact():
+    from mcp_lexoffice.server import create_credit_note
+
+    ctx = make_ctx({"create_credit_note": {"id": "cn-1"}, "get_contact": dict(_CONTACT_BARE)})
+    result = await create_credit_note(
+        ctx, recipient_name="Bare GmbH",
+        line_items=[{"name": "A", "unit_price": 1}],
+        contact_id="c-bare",
+    )
+    parsed = as_dict(result)
+    assert "billing address" in parsed["warning"]
+
+
+async def test_linked_contact_warning_person_contact_needs_no_ansprechpartner():
+    """Person contacts have no contactPersons concept — only the address is checked."""
+    from mcp_lexoffice.server import _linked_contact_warning
+
+    person_with_address = {
+        "id": "c-p", "version": 1,
+        "person": {"firstName": "Max", "lastName": "Muster"},
+        "addresses": {"billing": [{"street": "Weg 1", "city": "Berlin", "countryCode": "DE"}]},
+    }
+    ctx = make_ctx({"get_contact": person_with_address})
+    assert await _linked_contact_warning(ctx, "c-p") is None

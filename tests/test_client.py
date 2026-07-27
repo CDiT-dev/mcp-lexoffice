@@ -538,8 +538,22 @@ async def test_finalize_quotation_uses_version(client, mock_api):
 
 async def test_create_dunning(client, mock_api):
     mock_api.post("/dunnings").respond(200, json={"id": "d-001"})
-    result = await client.create_dunning({"invoiceId": "inv-001"})
+    result = await client.create_dunning({"lineItems": []})
     assert result["id"] == "d-001"
+
+
+async def test_create_dunning_sends_preceding_sales_voucher_id(client, mock_api):
+    """The invoice link travels as a query parameter — Lexoffice has no body field for it."""
+    route = mock_api.post("/dunnings").respond(200, json={"id": "d-002"})
+    result = await client.create_dunning({"lineItems": []}, preceding_id="inv-001")
+    assert result["id"] == "d-002"
+    assert "precedingSalesVoucherId=inv-001" in str(route.calls[0].request.url)
+
+
+async def test_create_dunning_without_preceding_id_sends_no_param(client, mock_api):
+    route = mock_api.post("/dunnings").respond(200, json={"id": "d-003"})
+    await client.create_dunning({"lineItems": []})
+    assert "precedingSalesVoucherId" not in str(route.calls[0].request.url)
 
 
 async def test_render_dunning_document(client, mock_api):

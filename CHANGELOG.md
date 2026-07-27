@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.3.18] - 2026-07-27
+
+- fix(dunning): pass precedingSalesVoucherId and a full voucher body
+
+
+## Fork releases (PoJo93) — superseded by the upstream 0.3.x line below
+
+The fork's own 0.2.4/0.2.5 releases collide in numbering with upstream's
+(different content); they are kept here fork-tagged for traceability.
+Both fixes are covered by upstream ≥0.3.0.
+
+### [0.2.5-fork] - 2026-06-17
+
+- Fix invoice address/contact-person not resolving from contact_id
+
+### [0.2.4-fork] - 2026-05-21
+
+- fix: omit paymentConditions so Lexware applies its own default
+
+
 ## [0.3.15] - 2026-07-08
 
 - openspec: reference consolidated cdit store

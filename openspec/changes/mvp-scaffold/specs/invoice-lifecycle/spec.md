@@ -8,8 +8,15 @@ The server SHALL provide a `create_draft_invoice` tool that accepts named parame
 - **THEN** the tool creates a draft invoice in Lexoffice with `taxConditions.taxType: "vatfree"`, returns the invoice ID, invoice number (if assigned), and a deep link to `https://app.lexoffice.de/#/voucher/edit/{id}`
 
 #### Scenario: Create draft invoice with full params
-- **WHEN** `create_draft_invoice` is called with `recipient_name`, `recipient_address` (street, zip, city, country_code), `recipient_email`, `line_items`, `currency`, `payment_term_duration` (days), `title`, `introduction`, `remark`
-- **THEN** the tool creates a draft invoice with all provided fields populated
+- **WHEN** `create_draft_invoice` is called with `recipient_name`, `recipient_address` (street, zip, city, country_code), `recipient_email`, `line_items`, `currency`, `payment_condition_id`, `title`, `introduction`, `remark`
+- **THEN** the tool embeds the payment condition matching `payment_condition_id` from `/v1/payment-conditions` (fields: `paymentTermLabel`, `paymentTermDuration`, optional `paymentDiscountConditions`) and creates a draft invoice with all provided fields populated
+
+#### Scenario: Default payment condition resolution
+- **WHEN** `create_draft_invoice` is called without `payment_condition_id`
+- **THEN** the tool uses the entry marked `organizationDefault` from `/v1/payment-conditions`
+- **AND IF** conditions exist but none is marked `organizationDefault`, the tool returns an error listing available IDs
+- **AND IF** no conditions are configured, the `paymentConditions` field is omitted from the request
+- **AND IF** `payment_condition_id` is provided but not found, the tool refreshes the cache once; if still missing, it returns an error listing available IDs
 
 #### Scenario: Line item structure
 - **WHEN** a line item is provided with `name`, `quantity`, `unit_price`, and optionally `description`, `unit_name`

@@ -8,7 +8,7 @@
 
 ## 2. Invoice Lifecycle (MVP — CDI-672)
 
-- [x] 2.1 Add `create_draft_invoice` tool — named params (recipient_name, line_items, currency, payment_term_duration, title, introduction, remark), vatfree defaults, returns ID + deep link
+- [x] 2.1 Add `create_draft_invoice` tool — named params (recipient_name, line_items, currency, payment_condition_id, title, introduction, remark), vatfree defaults, returns ID + deep link
 - [x] 2.2 Add `finalize_invoice` tool — takes invoice_id, returns invoice number + deep link
 - [x] 2.3 Add `send_invoice` tool — takes invoice_id + recipient_email, validates invoice is finalized first
 - [x] 2.4 Reshape existing `get_invoice` to include deep link in response

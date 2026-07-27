@@ -184,8 +184,11 @@ mcp-lexoffice.example.com {
 
 | Tool | Description |
 |------|-------------|
-| `create_dunning` | Create a payment reminder for an overdue invoice. |
+| `create_dunning` | Create a payment reminder for an overdue invoice. Recipient, positions and tax conditions are copied from the invoice, which is linked via `precedingSalesVoucherId`. Optional `note` / `title` / `remark`. |
 | `render_dunning_pdf` | Render a dunning PDF and get the document file ID. |
+
+The invoice must be finalized — dunning a draft is refused. A dunning for an invoice that is
+already paid/voided or not yet due is still created, with a `warning` attached.
 
 ### Articles (Service Catalog)
 

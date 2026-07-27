@@ -14,7 +14,7 @@ from fastmcp.exceptions import ToolError
 from mcp.types import Icon, ToolAnnotations
 from pydantic import BaseModel, ConfigDict, Field, model_serializer
 
-from .client import LexofficeClient
+from mcp_lexoffice.client import LexofficeClient
 
 logger = logging.getLogger(__name__)
 
@@ -57,8 +57,8 @@ async def lifespan(mcp: FastMCP):
     yield {"lexoffice": client}
 
 
-from .auth import BearerTokenVerifier
-from .config import get_settings
+from mcp_lexoffice.auth import BearerTokenVerifier
+from mcp_lexoffice.config import get_settings
 
 _settings = get_settings()
 _api_key = _settings.mcp_api_key.get_secret_value()
@@ -454,6 +454,8 @@ class Dunning(LexofficeBase):
     title: str | None = None
     totalPrice: dict[str, Any] | None = None
     lineItems: list[dict[str, Any]] = Field(default_factory=list)
+    # Echoed back by the server: the invoice this Mahnung chases.
+    precedingSalesVoucherId: str | None = None
 
 
 class RecurringTemplate(LexofficeBase):
@@ -624,6 +626,78 @@ def _build_address(
     return addr
 
 
+def _billing_address(
+    street: str | None,
+    zip_code: str | None,
+    city: str | None,
+    country_code: str,
+    *,
+    base: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build a contact billing address entry, merging over ``base`` (the existing
+    billing address on update) so partial edits keep unspecified fields intact."""
+    addr: dict[str, Any] = dict(base or {})
+    if street:
+        addr["street"] = street
+    if zip_code:
+        addr["zip"] = zip_code
+    if city:
+        addr["city"] = city
+    addr["countryCode"] = country_code or addr.get("countryCode") or "DE"
+    return addr
+
+
+async def _linked_contact_warning(ctx: Context, contact_id: str) -> str | None:
+    """Check a contact linked via address.contactId for renderable recipient data.
+
+    Lexware resolves the billing address and primary contact person (Ansprechpartner)
+    from the contact record — when the record lacks them, the voucher silently prints a
+    bare recipient name. Returns a human-readable warning naming what's missing (and how
+    to fix it via update_contact), or None when the contact is complete. Diagnostics
+    only: fetch errors are swallowed so voucher creation never fails on this check."""
+    try:
+        contact = await _client(ctx).get_contact(contact_id)
+    except Exception:
+        return None
+    missing = []
+    billing = (contact.get("addresses") or {}).get("billing") or []
+    if not any(a.get("street") or a.get("city") for a in billing):
+        missing.append("billing address")
+    if "company" in contact and not (contact["company"].get("contactPersons") or []):
+        missing.append("contact person (Ansprechpartner)")
+    if not missing:
+        return None
+    return (
+        f"Linked contact {contact_id} has no {' and no '.join(missing)} — the voucher "
+        f"will render without it. Add the missing data with update_contact, then "
+        f"recreate or edit the draft."
+    )
+
+
+def _contact_person(
+    first_name: str | None,
+    last_name: str | None,
+    email: str | None,
+    phone: str | None,
+    *,
+    base: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build a company contact person (Ansprechpartner) entry, merging over ``base``
+    (the existing primary person on update). Marked primary so Lexware prints it on
+    vouchers linked via contactId."""
+    person: dict[str, Any] = dict(base or {})
+    if first_name:
+        person["firstName"] = first_name
+    if last_name:
+        person["lastName"] = last_name
+    if email:
+        person["emailAddress"] = email
+    if phone:
+        person["phoneNumber"] = phone
+    person["primary"] = True
+    return person
+
+
 # ── Profile ──────────────────────────────────────────────────────────
 
 
@@ -705,6 +779,11 @@ async def create_draft_invoice(
     result = await _client(ctx).create_invoice(data)
     invoice_id = result.get("id", "")
     result["deepLink"] = _deep_link(invoice_id, edit=True)
+    if contact_id:
+        warning = await _linked_contact_warning(ctx, contact_id)
+        if warning:
+            result["warning"] = warning
+            await ctx.warning(warning)
     return Invoice.model_validate(result)
 
 
@@ -1202,19 +1281,46 @@ async def create_contact(
     last_name: Annotated[str | None, "Person last name"] = None,
     role: Annotated[Literal["customer", "vendor"], "Contact role"] = "customer",
     email: Annotated[str | None, "Email address"] = None,
-    street: Annotated[str | None, "Street address"] = None,
-    zip_code: Annotated[str | None, "Postal code"] = None,
-    city: Annotated[str | None, "City"] = None,
+    phone: Annotated[str | None, "Business phone number"] = None,
+    street: Annotated[str | None, "Billing street address (recommended — invoices linked via contact_id print this address)"] = None,
+    zip_code: Annotated[str | None, "Billing postal code"] = None,
+    city: Annotated[str | None, "Billing city"] = None,
     country_code: Annotated[str, "ISO country code"] = "DE",
+    contact_person_first_name: Annotated[str | None, "Contact person (Ansprechpartner) first name — company contacts only; printed on invoices linked via contact_id"] = None,
+    contact_person_last_name: Annotated[str | None, "Contact person (Ansprechpartner) last name — company contacts only"] = None,
+    contact_person_email: Annotated[str | None, "Contact person email"] = None,
+    contact_person_phone: Annotated[str | None, "Contact person phone number"] = None,
 ) -> Contact:
     """[finance] Create a new contact (company or person) in Lexware Office.
+
+    Invoices/quotations linked via contact_id print the contact's billing address and
+    primary contact person (Ansprechpartner) — provide street/zip_code/city and the
+    contact_person_* fields here so linked vouchers render complete recipient data.
 
     Disambiguation: For accounting/invoice contacts → lexoffice. For CRM/chat contacts → watermelon."""
     data: dict[str, Any] = {"version": 0, "roles": {role: {}}}
 
+    has_contact_person = any(
+        (contact_person_first_name, contact_person_last_name, contact_person_email, contact_person_phone)
+    )
+
     if company_name:
         data["company"] = {"name": company_name}
+        if has_contact_person:
+            data["company"]["contactPersons"] = [
+                _contact_person(
+                    contact_person_first_name,
+                    contact_person_last_name,
+                    contact_person_email,
+                    contact_person_phone,
+                )
+            ]
     elif first_name or last_name:
+        if has_contact_person:
+            raise ToolError(
+                "contact_person_* fields only apply to company contacts. "
+                "For a person contact, the person IS the contact."
+            )
         data["person"] = {}
         if first_name:
             data["person"]["firstName"] = first_name
@@ -1225,16 +1331,11 @@ async def create_contact(
 
     if email:
         data["emailAddresses"] = {"business": [email]}
+    if phone:
+        data["phoneNumbers"] = {"business": [phone]}
 
     if street or zip_code or city:
-        addr: dict[str, str] = {"countryCode": country_code}
-        if street:
-            addr["street"] = street
-        if zip_code:
-            addr["zip"] = zip_code
-        if city:
-            addr["city"] = city
-        data["addresses"] = {"billing": [addr]}
+        data["addresses"] = {"billing": [_billing_address(street, zip_code, city, country_code)]}
 
     result = await _client(ctx).create_contact(data)
     contact_id = result.get("id", "")
@@ -1259,8 +1360,21 @@ async def update_contact(
     first_name: Annotated[str | None, "Updated person first name"] = None,
     last_name: Annotated[str | None, "Updated person last name"] = None,
     email: Annotated[str | None, "Updated email address"] = None,
+    phone: Annotated[str | None, "Updated business phone number"] = None,
+    street: Annotated[str | None, "Billing street address — sets or updates the billing address (merged field-by-field with the existing one)"] = None,
+    zip_code: Annotated[str | None, "Billing postal code"] = None,
+    city: Annotated[str | None, "Billing city"] = None,
+    country_code: Annotated[str | None, "ISO country code (kept from existing address if omitted, else DE)"] = None,
+    contact_person_first_name: Annotated[str | None, "Contact person (Ansprechpartner) first name — company contacts only; merged into the primary contact person, or added if none exists"] = None,
+    contact_person_last_name: Annotated[str | None, "Contact person (Ansprechpartner) last name"] = None,
+    contact_person_email: Annotated[str | None, "Contact person email"] = None,
+    contact_person_phone: Annotated[str | None, "Contact person phone number"] = None,
 ) -> Contact:
-    """[finance] Update an existing contact. Fetches current state and applies changes atomically."""
+    """[finance] Update an existing contact. Fetches current state and applies changes atomically.
+
+    Use this to add a missing billing address or contact person (Ansprechpartner) to a
+    contact — invoices linked via contact_id print both, so a contact without them
+    renders a bare recipient name on the voucher."""
     existing = await _client(ctx).get_contact(contact_id)
 
     if company_name and "company" in existing:
@@ -1271,6 +1385,39 @@ async def update_contact(
         existing["person"]["lastName"] = last_name
     if email:
         existing["emailAddresses"] = {"business": [email]}
+    if phone:
+        existing["phoneNumbers"] = {"business": [phone]}
+
+    if street or zip_code or city or country_code:
+        addresses = existing.setdefault("addresses", {})
+        billing = addresses.get("billing") or []
+        base = billing[0] if billing else None
+        addresses["billing"] = [
+            _billing_address(street, zip_code, city, country_code or "", base=base)
+        ]
+
+    if any((contact_person_first_name, contact_person_last_name, contact_person_email, contact_person_phone)):
+        if "company" not in existing:
+            raise ToolError(
+                "contact_person_* fields only apply to company contacts. "
+                "For a person contact, update first_name/last_name directly."
+            )
+        persons = existing["company"].get("contactPersons") or []
+        # Merge into the existing primary (or first) person; append if none exist.
+        idx = next((i for i, p in enumerate(persons) if p.get("primary")), 0 if persons else None)
+        base = persons[idx] if idx is not None else None
+        merged = _contact_person(
+            contact_person_first_name,
+            contact_person_last_name,
+            contact_person_email,
+            contact_person_phone,
+            base=base,
+        )
+        if idx is not None:
+            persons[idx] = merged
+        else:
+            persons.append(merged)
+        existing["company"]["contactPersons"] = persons
 
     result = await _client(ctx).update_contact(contact_id, existing)
     result["deepLink"] = _contact_link(contact_id)
@@ -1332,6 +1479,11 @@ async def create_draft_quotation(
     result = await _client(ctx).create_quotation(data)
     qid = result.get("id", "")
     result["deepLink"] = _deep_link(qid, edit=True)
+    if contact_id:
+        warning = await _linked_contact_warning(ctx, contact_id)
+        if warning:
+            result["warning"] = warning
+            await ctx.warning(warning)
     return Quotation.model_validate(result)
 
 
@@ -1388,6 +1540,55 @@ async def pursue_quotation_to_invoice(
 
 # ── Dunnings ─────────────────────────────────────────────────────────
 
+DUNNING_INTRODUCTION = (
+    "bei der Durchsicht unserer Unterlagen ist uns aufgefallen, dass die unten "
+    "aufgeführte Rechnung noch offen ist. Wir bitten Sie, den Betrag zu überweisen."
+)
+
+# Computed by Lexoffice — echoing them back on create is rejected as read-only.
+_READONLY_LINE_ITEM_KEYS = frozenset({"lineItemAmount"})
+_DUNNING_ADDRESS_KEYS = ("name", "supplement", "street", "city", "zip", "countryCode")
+
+
+def _dunning_line_items(invoice: dict[str, Any]) -> list[dict[str, Any]]:
+    """Carry the invoice's positions over into the dunning body.
+
+    A dunning is a full sales voucher in its own right: Lexoffice wants the dunned
+    positions repeated in the body and the invoice link in the query string, so the
+    line items are copied verbatim minus the read-only (computed) fields."""
+    return [
+        {k: v for k, v in item.items() if k not in _READONLY_LINE_ITEM_KEYS}
+        for item in invoice.get("lineItems") or []
+    ]
+
+
+def _dunning_address(invoice: dict[str, Any]) -> dict[str, Any]:
+    """Reuse the invoice's recipient for the dunning.
+
+    For a contact-linked invoice send ONLY contactId — any extra address field flips
+    Lexware into manual-address mode and the billing address + Ansprechpartner stay
+    blank on the rendered Mahnung."""
+    address = invoice.get("address") or {}
+    if address.get("contactId"):
+        return {"contactId": address["contactId"]}
+    return {k: address[k] for k in _DUNNING_ADDRESS_KEYS if address.get(k)}
+
+
+def _dunning_warning(invoice: dict[str, Any]) -> str | None:
+    """Flag a dunning that is probably a mistake (already settled, or not yet due)."""
+    status = invoice.get("voucherStatus", "")
+    if status in ("paidoff", "voided"):
+        return f"Invoice {invoice.get('voucherNumber') or invoice.get('id')} is already {status} — dunning it is probably not intended."
+    due = invoice.get("dueDate")
+    if due:
+        try:
+            due_date = date.fromisoformat(due[:10])
+        except ValueError:
+            return None
+        if due_date >= date.today():
+            return f"Invoice {invoice.get('voucherNumber') or invoice.get('id')} is not overdue yet (due {due_date.isoformat()}) — the dunning was created anyway."
+    return None
+
 
 @mcp.tool(
     tags={"finance", "dunning", "write", "irreversible"},
@@ -1402,15 +1603,54 @@ async def pursue_quotation_to_invoice(
 async def create_dunning(
     ctx: Context,
     invoice_id: Annotated[str, "UUID of the overdue invoice"],
-    note: Annotated[str | None, "Custom dunning text"] = None,
+    note: Annotated[str | None, "Custom dunning text (replaces the default introduction)"] = None,
+    title: Annotated[str, "Document title"] = "Mahnung",
+    remark: Annotated[str | None, "Closing remark, e.g. a new payment deadline"] = None,
 ) -> Dunning:
-    """[finance] Create a payment reminder (Mahnung) for an overdue invoice."""
-    data: dict[str, Any] = {"invoiceId": invoice_id}
-    if note:
-        data["text"] = note
-    result = await _client(ctx).create_dunning(data)
+    """[finance] Create a payment reminder (Mahnung) for an overdue invoice.
+
+    The invoice must be finalized (status open/paidoff/voided) — a draft cannot be dunned.
+    Recipient, positions and tax conditions are taken from the invoice."""
+    invoice = await _client(ctx).get_invoice(invoice_id)
+    if invoice.get("voucherStatus") == "draft":
+        raise ToolError(
+            "Invoice is still a draft and cannot be dunned. Finalize it first "
+            f"(finalize_invoice). Edit it at {_deep_link(invoice_id, edit=True)}"
+        )
+
+    line_items = _dunning_line_items(invoice)
+    if not line_items:
+        raise ToolError(
+            f"Invoice {invoice_id} has no line items to dun. "
+            f"Check it at {_deep_link(invoice_id)}"
+        )
+
+    data: dict[str, Any] = {
+        "voucherDate": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000+00:00"),
+        "address": _dunning_address(invoice),
+        "lineItems": line_items,
+        "totalPrice": {
+            "currency": (invoice.get("totalPrice") or {}).get("currency", "EUR")
+        },
+        "taxConditions": invoice.get("taxConditions")
+        or {"taxType": (await _get_tax_config(ctx))["tax_type"]},
+        "title": title,
+        "introduction": note or DUNNING_INTRODUCTION,
+    }
+    if invoice.get("shippingConditions"):
+        data["shippingConditions"] = invoice["shippingConditions"]
+    if remark:
+        data["remark"] = remark
+
+    # The invoice link is a query parameter (precedingSalesVoucherId), not a body field.
+    result = await _client(ctx).create_dunning(data, preceding_id=invoice_id)
     dunning_id = result.get("id", "")
     result["deepLink"] = _deep_link(dunning_id)
+    result["precedingSalesVoucherId"] = invoice_id
+    warning = _dunning_warning(invoice)
+    if warning:
+        result["warning"] = warning
+        await ctx.warning(warning)
     return Dunning.model_validate(result)
 
 
@@ -1983,6 +2223,16 @@ async def create_and_send_invoice(
     Use when the user says 'send an invoice to X for Y'. Creates a draft, finalizes it
     (assigns invoice number), and emails it to the recipient. For drafts that need
     review first, use create_draft_invoice instead."""
+    if contact_id:
+        # This path finalizes AND sends — irreversible. A linked contact without a
+        # billing address would produce a sent invoice with a blank recipient address,
+        # so block up front instead of warning after the fact (draft flow only warns).
+        warning = await _linked_contact_warning(ctx, contact_id)
+        if warning and "billing address" in warning:
+            raise ToolError(
+                f"{warning} Refusing to finalize and send with an incomplete recipient "
+                f"address — fix the contact or use create_draft_invoice to review first."
+            )
     tax_config = await _get_tax_config(ctx)
     effective_rate = tax_rate if tax_rate is not None else tax_config["default_rate"]
     address = {"contactId": contact_id} if contact_id else _build_address(recipient_name, street, zip_code, city, country_code)
@@ -2044,11 +2294,21 @@ async def find_or_create_contact(
     email: Annotated[str | None, "Email address (used for creation if contact not found)"] = None,
     first_name: Annotated[str | None, "Person first name (if not a company)"] = None,
     last_name: Annotated[str | None, "Person last name (if not a company)"] = None,
+    street: Annotated[str | None, "Billing street address (used for creation — recommended so invoices linked via contact_id print a full address)"] = None,
+    zip_code: Annotated[str | None, "Billing postal code (used for creation)"] = None,
+    city: Annotated[str | None, "Billing city (used for creation)"] = None,
+    country_code: Annotated[str, "ISO country code (used for creation)"] = "DE",
+    contact_person_first_name: Annotated[str | None, "Contact person (Ansprechpartner) first name — company contacts only, used for creation"] = None,
+    contact_person_last_name: Annotated[str | None, "Contact person (Ansprechpartner) last name — used for creation"] = None,
+    contact_person_email: Annotated[str | None, "Contact person email — used for creation"] = None,
 ) -> Contact:
     """[finance] Find a contact by name or create one if it doesn't exist. Returns the contact ID.
 
-    Searches by name first. If exactly one match is found, returns it.
-    If no match, creates a new contact. If multiple matches, returns them all for disambiguation.
+    Searches by name first. If exactly one match is found, returns it (address/contact-person
+    params are NOT applied to existing contacts — use update_contact for that).
+    If no match, creates a new contact — pass street/zip_code/city and contact_person_* so
+    invoices linked via contact_id render a complete address and Ansprechpartner.
+    If multiple matches, returns them all for disambiguation.
 
     Polymorphic payload: a single matched/created contact object (carrying ``_action`` =
     found_existing / created_new), or a disambiguation envelope ({``_action`` = multiple_matches,
@@ -2068,7 +2328,13 @@ async def find_or_create_contact(
         return Contact.model_validate({"_action": "multiple_matches", "message": f"Found {len(matches)} contacts matching '{name}'. Pick one or refine the search.", "contacts": matches})
 
     data: dict[str, Any] = {"version": 0, "roles": {role: {}}}
+    has_contact_person = any((contact_person_first_name, contact_person_last_name, contact_person_email))
     if first_name or last_name:
+        if has_contact_person:
+            raise ToolError(
+                "contact_person_* fields only apply to company contacts. "
+                "For a person contact, the person IS the contact."
+            )
         person: dict[str, str] = {}
         if first_name:
             person["firstName"] = first_name
@@ -2077,8 +2343,19 @@ async def find_or_create_contact(
         data["person"] = person
     else:
         data["company"] = {"name": name}
+        if has_contact_person:
+            data["company"]["contactPersons"] = [
+                _contact_person(
+                    contact_person_first_name,
+                    contact_person_last_name,
+                    contact_person_email,
+                    None,
+                )
+            ]
     if email:
         data["emailAddresses"] = {"business": [email]}
+    if street or zip_code or city:
+        data["addresses"] = {"billing": [_billing_address(street, zip_code, city, country_code)]}
 
     result = await _client(ctx).create_contact(data)
     contact_id = result.get("id", "")
@@ -2272,6 +2549,11 @@ async def create_credit_note(
     )
     cn_id = result.get("id", "")
     result["deepLink"] = _deep_link(cn_id, edit=not finalize)
+    if contact_id:
+        warning = await _linked_contact_warning(ctx, contact_id)
+        if warning:
+            result["warning"] = warning
+            await ctx.warning(warning)
     return CreditNote.model_validate(result)
 
 

@@ -27,7 +27,7 @@ LEXOFFICE_API_KEY='op://Vault/item-id/API key' python -m mcp_lexoffice.server
 - Override with `LEXOFFICE_TAX_TYPE` env var for testing (skips API call)
 - Lazy-cached in `lifespan_context` — server restart clears cache
 - Per-item `tax_rate` override available on invoices, quotations, and articles
-- Default payment terms: "Zahlbar sofort, rein netto"
+- Payment conditions: omitted by default — Lexware applies contact-specific or organization default automatically. Override via `payment_condition_id` from `list_payment_conditions` (then the template is rendered into `paymentTermLabel`).
 
 ## Tools (41 total)
 - **Invoices**: create_draft_invoice, create_and_send_invoice, finalize_invoice, send_invoice, get_invoice, get_invoice_pdf, list_invoices, delete_draft_invoice
@@ -89,6 +89,8 @@ Reference/context data exposed as resources so the model can pull it without a t
 - All tools return deep links to Lexoffice UI
 - Base URL migrating from lexoffice.io to lexware.io (both work currently)
 - **Structured vouchers** (`POST /v1/vouchers`): each voucherItem needs a `categoryId` (Buchungskonto — discover via `list_posting_categories`; `create_voucher` auto-resolves a default `outgo` category if none given). Lexoffice **rejects `taxType=net` + `voucherStatus=unchecked`** — use `gross` to land a voucher in "Zu prüfen", or `open` for net. Only `open` and `unchecked` statuses are writeable. File attach is `POST /v1/vouchers/{id}/files` (multipart field `file`).
+- **Dunnings** (`POST /v1/dunnings?precedingSalesVoucherId={invoiceId}`): the link to the chased invoice is a **query parameter**, not a body field — there is no `invoiceId` property, and omitting the param makes the API reject the create. The body is a full sales voucher (`voucherDate`, `address`, `lineItems`, `totalPrice.currency`, `taxConditions`, `shippingConditions`, `title`, `introduction`, optional `remark`) with no read-only fields (`lineItemAmount` is computed). `create_dunning` derives all of it from the invoice via `get_invoice`, so the tool keeps its `invoice_id` + optional `note`/`title`/`remark` signature. The invoice must be finalized — a draft is refused.
+- **Contact-linked vouchers** (`address.contactId`): send ONLY `contactId` — any extra address field flips Lexware into manual-address mode and the billing address + Ansprechpartner stay blank. Both render **from the contact record**, so contacts need a billing address and (for companies) a `contactPersons` entry — create/maintain via `create_contact`/`update_contact`/`find_or_create_contact` (street/zip_code/city + `contact_person_*` params). Draft tools attach a `warning` when the linked contact is incomplete; `create_and_send_invoice` refuses to send without a billing address.
 
 ## Testing
 ```bash

@@ -454,6 +454,8 @@ class Dunning(LexofficeBase):
     title: str | None = None
     totalPrice: dict[str, Any] | None = None
     lineItems: list[dict[str, Any]] = Field(default_factory=list)
+    # Echoed back by the server: the invoice this Mahnung chases.
+    precedingSalesVoucherId: str | None = None
 
 
 class RecurringTemplate(LexofficeBase):
@@ -1538,6 +1540,55 @@ async def pursue_quotation_to_invoice(
 
 # ── Dunnings ─────────────────────────────────────────────────────────
 
+DUNNING_INTRODUCTION = (
+    "bei der Durchsicht unserer Unterlagen ist uns aufgefallen, dass die unten "
+    "aufgeführte Rechnung noch offen ist. Wir bitten Sie, den Betrag zu überweisen."
+)
+
+# Computed by Lexoffice — echoing them back on create is rejected as read-only.
+_READONLY_LINE_ITEM_KEYS = frozenset({"lineItemAmount"})
+_DUNNING_ADDRESS_KEYS = ("name", "supplement", "street", "city", "zip", "countryCode")
+
+
+def _dunning_line_items(invoice: dict[str, Any]) -> list[dict[str, Any]]:
+    """Carry the invoice's positions over into the dunning body.
+
+    A dunning is a full sales voucher in its own right: Lexoffice wants the dunned
+    positions repeated in the body and the invoice link in the query string, so the
+    line items are copied verbatim minus the read-only (computed) fields."""
+    return [
+        {k: v for k, v in item.items() if k not in _READONLY_LINE_ITEM_KEYS}
+        for item in invoice.get("lineItems") or []
+    ]
+
+
+def _dunning_address(invoice: dict[str, Any]) -> dict[str, Any]:
+    """Reuse the invoice's recipient for the dunning.
+
+    For a contact-linked invoice send ONLY contactId — any extra address field flips
+    Lexware into manual-address mode and the billing address + Ansprechpartner stay
+    blank on the rendered Mahnung."""
+    address = invoice.get("address") or {}
+    if address.get("contactId"):
+        return {"contactId": address["contactId"]}
+    return {k: address[k] for k in _DUNNING_ADDRESS_KEYS if address.get(k)}
+
+
+def _dunning_warning(invoice: dict[str, Any]) -> str | None:
+    """Flag a dunning that is probably a mistake (already settled, or not yet due)."""
+    status = invoice.get("voucherStatus", "")
+    if status in ("paidoff", "voided"):
+        return f"Invoice {invoice.get('voucherNumber') or invoice.get('id')} is already {status} — dunning it is probably not intended."
+    due = invoice.get("dueDate")
+    if due:
+        try:
+            due_date = date.fromisoformat(due[:10])
+        except ValueError:
+            return None
+        if due_date >= date.today():
+            return f"Invoice {invoice.get('voucherNumber') or invoice.get('id')} is not overdue yet (due {due_date.isoformat()}) — the dunning was created anyway."
+    return None
+
 
 @mcp.tool(
     tags={"finance", "dunning", "write", "irreversible"},
@@ -1552,15 +1603,54 @@ async def pursue_quotation_to_invoice(
 async def create_dunning(
     ctx: Context,
     invoice_id: Annotated[str, "UUID of the overdue invoice"],
-    note: Annotated[str | None, "Custom dunning text"] = None,
+    note: Annotated[str | None, "Custom dunning text (replaces the default introduction)"] = None,
+    title: Annotated[str, "Document title"] = "Mahnung",
+    remark: Annotated[str | None, "Closing remark, e.g. a new payment deadline"] = None,
 ) -> Dunning:
-    """[finance] Create a payment reminder (Mahnung) for an overdue invoice."""
-    data: dict[str, Any] = {"invoiceId": invoice_id}
-    if note:
-        data["text"] = note
-    result = await _client(ctx).create_dunning(data)
+    """[finance] Create a payment reminder (Mahnung) for an overdue invoice.
+
+    The invoice must be finalized (status open/paidoff/voided) — a draft cannot be dunned.
+    Recipient, positions and tax conditions are taken from the invoice."""
+    invoice = await _client(ctx).get_invoice(invoice_id)
+    if invoice.get("voucherStatus") == "draft":
+        raise ToolError(
+            "Invoice is still a draft and cannot be dunned. Finalize it first "
+            f"(finalize_invoice). Edit it at {_deep_link(invoice_id, edit=True)}"
+        )
+
+    line_items = _dunning_line_items(invoice)
+    if not line_items:
+        raise ToolError(
+            f"Invoice {invoice_id} has no line items to dun. "
+            f"Check it at {_deep_link(invoice_id)}"
+        )
+
+    data: dict[str, Any] = {
+        "voucherDate": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000+00:00"),
+        "address": _dunning_address(invoice),
+        "lineItems": line_items,
+        "totalPrice": {
+            "currency": (invoice.get("totalPrice") or {}).get("currency", "EUR")
+        },
+        "taxConditions": invoice.get("taxConditions")
+        or {"taxType": (await _get_tax_config(ctx))["tax_type"]},
+        "title": title,
+        "introduction": note or DUNNING_INTRODUCTION,
+    }
+    if invoice.get("shippingConditions"):
+        data["shippingConditions"] = invoice["shippingConditions"]
+    if remark:
+        data["remark"] = remark
+
+    # The invoice link is a query parameter (precedingSalesVoucherId), not a body field.
+    result = await _client(ctx).create_dunning(data, preceding_id=invoice_id)
     dunning_id = result.get("id", "")
     result["deepLink"] = _deep_link(dunning_id)
+    result["precedingSalesVoucherId"] = invoice_id
+    warning = _dunning_warning(invoice)
+    if warning:
+        result["warning"] = warning
+        await ctx.warning(warning)
     return Dunning.model_validate(result)
 
 

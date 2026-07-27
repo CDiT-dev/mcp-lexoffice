@@ -249,8 +249,22 @@ class LexofficeClient:
 
     # ── Dunnings ─────────────────────────────────────────────────────
 
-    async def create_dunning(self, data: dict) -> dict:
-        resp = await self._request("POST", "/dunnings", json=data)
+    async def create_dunning(
+        self, data: dict, *, preceding_id: str | None = None
+    ) -> dict:
+        """Create a dunning (Mahnung).
+
+        Lexoffice links the dunning to the invoice it chases through the
+        ``precedingSalesVoucherId`` QUERY parameter — not through a body field.
+        Omitting it makes the API reject the request, so callers must pass the
+        preceding invoice id here.
+        """
+        params: dict[str, str] = {}
+        if preceding_id:
+            params["precedingSalesVoucherId"] = preceding_id
+        resp = await self._request(
+            "POST", "/dunnings", json=data, params=params or None
+        )
         return resp.json()
 
     async def render_dunning_document(self, dunning_id: str) -> dict:

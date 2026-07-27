@@ -1809,28 +1809,155 @@ async def test_pursue_quotation_finalized():
 # ── Dunning tools ────────────────────────────────────────────────────
 
 
-async def test_create_dunning_tool_with_note():
+def _overdue_invoice(**overrides) -> dict:
+    """A finalized, overdue invoice as returned by GET /v1/invoices/{id}."""
+    invoice = {
+        "id": "inv-1",
+        "voucherStatus": "open",
+        "voucherNumber": "RE-1001",
+        "dueDate": (date.today() - timedelta(days=14)).isoformat() + "T00:00:00.000+01:00",
+        "address": {"contactId": "c-1", "name": "Bike GmbH", "street": "Musterstr. 1"},
+        "lineItems": [
+            {
+                "type": "custom",
+                "name": "Beratung",
+                "quantity": 2,
+                "unitName": "Stunde",
+                "unitPrice": {"currency": "EUR", "netAmount": 150, "taxRatePercentage": 19},
+                "lineItemAmount": 300,
+            }
+        ],
+        "totalPrice": {"currency": "EUR", "totalNetAmount": 300, "totalGrossAmount": 357},
+        "taxConditions": {"taxType": "net"},
+        "shippingConditions": {"shippingDate": "2026-06-01T00:00:00.000+02:00", "shippingType": "service"},
+    }
+    invoice.update(overrides)
+    return invoice
+
+
+async def test_create_dunning_passes_preceding_sales_voucher_id():
+    """The invoice link is a QUERY parameter — without it Lexoffice rejects the dunning."""
     from mcp_lexoffice.server import create_dunning
 
-    ctx = make_ctx({"create_dunning": {"id": "d-1"}})
-    result = await create_dunning(ctx, invoice_id="inv-1", note="Bitte zahlen")
+    ctx = make_ctx({"get_invoice": _overdue_invoice(), "create_dunning": {"id": "d-1"}})
+    result = await create_dunning(ctx, invoice_id="inv-1")
     parsed = as_dict(result)
     assert parsed["id"] == "d-1"
     assert "deepLink" in parsed
-    call_data = ctx.lifespan_context["lexoffice"].create_dunning.call_args[0][0]
-    assert call_data["text"] == "Bitte zahlen"
-    assert call_data["invoiceId"] == "inv-1"
+    assert parsed["precedingSalesVoucherId"] == "inv-1"
+    call = ctx.lifespan_context["lexoffice"].create_dunning.call_args
+    assert call.kwargs["preceding_id"] == "inv-1"
 
 
-async def test_create_dunning_tool_without_note():
+async def test_create_dunning_body_carries_invoice_positions():
+    """Body is a full sales voucher derived from the invoice, minus read-only fields."""
     from mcp_lexoffice.server import create_dunning
 
-    ctx = make_ctx({"create_dunning": {"id": "d-2"}})
-    result = await create_dunning(ctx, invoice_id="inv-2")
-    parsed = as_dict(result)
-    assert parsed["id"] == "d-2"
-    call_data = ctx.lifespan_context["lexoffice"].create_dunning.call_args[0][0]
-    assert "text" not in call_data
+    ctx = make_ctx({"get_invoice": _overdue_invoice(), "create_dunning": {"id": "d-1"}})
+    await create_dunning(ctx, invoice_id="inv-1")
+    data = ctx.lifespan_context["lexoffice"].create_dunning.call_args[0][0]
+    # The old (broken) shape put the link in the body and sent nothing else.
+    assert "invoiceId" not in data
+    assert data["lineItems"][0]["name"] == "Beratung"
+    assert "lineItemAmount" not in data["lineItems"][0]
+    assert data["taxConditions"] == {"taxType": "net"}
+    assert data["totalPrice"] == {"currency": "EUR"}
+    assert data["shippingConditions"]["shippingType"] == "service"
+    assert data["title"] == "Mahnung"
+    assert data["voucherDate"]
+    # Contact-linked invoice → ONLY contactId, else Lexware blanks the recipient block.
+    assert data["address"] == {"contactId": "c-1"}
+
+
+async def test_create_dunning_manual_address_invoice():
+    from mcp_lexoffice.server import create_dunning
+
+    invoice = _overdue_invoice(
+        address={"name": "Bike GmbH", "street": "Musterstr. 1", "zip": "79112", "city": "Freiburg", "countryCode": "DE"}
+    )
+    ctx = make_ctx({"get_invoice": invoice, "create_dunning": {"id": "d-1"}})
+    await create_dunning(ctx, invoice_id="inv-1")
+    data = ctx.lifespan_context["lexoffice"].create_dunning.call_args[0][0]
+    assert data["address"] == {
+        "name": "Bike GmbH",
+        "street": "Musterstr. 1",
+        "city": "Freiburg",
+        "zip": "79112",
+        "countryCode": "DE",
+    }
+
+
+async def test_create_dunning_note_and_remark():
+    from mcp_lexoffice.server import create_dunning
+
+    ctx = make_ctx({"get_invoice": _overdue_invoice(), "create_dunning": {"id": "d-2"}})
+    await create_dunning(
+        ctx, invoice_id="inv-1", note="Bitte zahlen", title="2. Mahnung", remark="Zahlbar in 7 Tagen"
+    )
+    data = ctx.lifespan_context["lexoffice"].create_dunning.call_args[0][0]
+    assert data["introduction"] == "Bitte zahlen"
+    assert data["title"] == "2. Mahnung"
+    assert data["remark"] == "Zahlbar in 7 Tagen"
+
+
+async def test_create_dunning_default_introduction():
+    from mcp_lexoffice.server import DUNNING_INTRODUCTION, create_dunning
+
+    ctx = make_ctx({"get_invoice": _overdue_invoice(), "create_dunning": {"id": "d-2"}})
+    await create_dunning(ctx, invoice_id="inv-1")
+    data = ctx.lifespan_context["lexoffice"].create_dunning.call_args[0][0]
+    assert data["introduction"] == DUNNING_INTRODUCTION
+    assert "remark" not in data
+
+
+async def test_create_dunning_rejects_draft_invoice():
+    from mcp_lexoffice.server import create_dunning
+
+    ctx = make_ctx({"get_invoice": _overdue_invoice(voucherStatus="draft")})
+    with pytest.raises(ToolError, match="draft"):
+        await create_dunning(ctx, invoice_id="inv-1")
+    ctx.lifespan_context["lexoffice"].create_dunning.assert_not_called()
+
+
+async def test_create_dunning_rejects_invoice_without_line_items():
+    from mcp_lexoffice.server import create_dunning
+
+    ctx = make_ctx({"get_invoice": _overdue_invoice(lineItems=[])})
+    with pytest.raises(ToolError, match="no line items"):
+        await create_dunning(ctx, invoice_id="inv-1")
+
+
+async def test_create_dunning_warns_when_not_overdue():
+    """Spec: a not-yet-due invoice still gets its dunning, with a warning attached."""
+    from mcp_lexoffice.server import create_dunning
+
+    invoice = _overdue_invoice(
+        dueDate=(date.today() + timedelta(days=10)).isoformat() + "T00:00:00.000+01:00"
+    )
+    ctx = make_ctx({"get_invoice": invoice, "create_dunning": {"id": "d-3"}})
+    parsed = as_dict(await create_dunning(ctx, invoice_id="inv-1"))
+    assert parsed["id"] == "d-3"
+    assert "not overdue" in parsed["warning"]
+
+
+async def test_create_dunning_warns_when_already_paid():
+    from mcp_lexoffice.server import create_dunning
+
+    ctx = make_ctx({"get_invoice": _overdue_invoice(voucherStatus="paidoff"), "create_dunning": {"id": "d-4"}})
+    parsed = as_dict(await create_dunning(ctx, invoice_id="inv-1"))
+    assert "paidoff" in parsed["warning"]
+
+
+async def test_create_dunning_falls_back_to_profile_tax_type():
+    """An invoice without taxConditions falls back to the detected tax regime."""
+    from mcp_lexoffice.server import create_dunning
+
+    invoice = _overdue_invoice()
+    del invoice["taxConditions"]
+    ctx = make_ctx({"get_invoice": invoice, "create_dunning": {"id": "d-5"}}, tax_type="vatfree")
+    await create_dunning(ctx, invoice_id="inv-1")
+    data = ctx.lifespan_context["lexoffice"].create_dunning.call_args[0][0]
+    assert data["taxConditions"] == {"taxType": "vatfree"}
 
 
 async def test_render_dunning_pdf_tool():

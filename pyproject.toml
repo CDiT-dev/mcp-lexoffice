@@ -14,12 +14,6 @@ dependencies = [
     "python-multipart>=0.0.27",  # GHSA: DoS via unbounded multipart headers
 ]
 
-[project.optional-dependencies]
-test = [
-    "pytest>=8.0",
-    "pytest-asyncio>=0.24",
-    "respx>=0.22",
-]
 
 [project.scripts]
 mcp-lexoffice = "mcp_lexoffice.server:main"
@@ -33,3 +27,10 @@ packages = ["mcp_lexoffice"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "respx>=0.22",
+]

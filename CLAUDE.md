@@ -92,7 +92,6 @@ Reference/context data exposed as resources so the model can pull it without a t
 
 ## Testing
 ```bash
-source .venv/bin/activate
-pip install -e ".[test]"
-python -m pytest tests/ -v  # 297 tests
+uv sync
+uv run pytest tests/ -v  # 297 tests
 ```

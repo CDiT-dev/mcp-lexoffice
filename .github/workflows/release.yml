@@ -33,7 +33,7 @@ jobs:
       - name: Install and test
         run: |
           uv sync
-          uv run pytest -x || echo "Tests skipped or failed"
+          uv run pytest -x
 
       - name: Security audit (pip-audit)
         run: uvx pip-audit

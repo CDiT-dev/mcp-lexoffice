@@ -256,9 +256,8 @@ The Lexoffice API enforces a **2 requests/second** rate limit. The client handle
 ## Testing
 
 ```bash
-source .venv/bin/activate
-pip install -e ".[test]"
-python -m pytest tests/ -v
+uv sync
+uv run pytest tests/ -v
 ```
 
 The test suite includes 297 tests covering:

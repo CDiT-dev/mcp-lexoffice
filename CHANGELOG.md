@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.3.17] - 2026-09-27
+
+- ci: add PR test gate, make tests actually run in release, add MCP protocol tests (#30)
+
+
 ## [0.3.15] - 2026-07-08
 
 - openspec: reference consolidated cdit store

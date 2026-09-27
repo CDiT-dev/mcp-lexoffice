@@ -17,6 +17,10 @@ RUN pip install --no-cache-dir uv \
 
 USER mcp
 
+# Release version (the git tag); /health reports it. Unset → pyproject version.
+ARG APP_VERSION=""
+ENV APP_VERSION=$APP_VERSION
+
 ENV MCP_TRANSPORT=streamable-http
 ENV MCP_HOST=0.0.0.0
 ENV MCP_PORT=8000

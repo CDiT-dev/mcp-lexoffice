@@ -15,6 +15,7 @@ from mcp.types import Icon, ToolAnnotations
 from pydantic import BaseModel, ConfigDict, Field, model_serializer
 
 from .client import LexofficeClient
+from .usage import UsageMiddleware
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +111,7 @@ mcp = FastMCP(
     lifespan=lifespan,
     auth=_auth,
 )
+mcp.add_middleware(UsageMiddleware("lexoffice"))
 
 
 def _fmt(data: Any) -> str:

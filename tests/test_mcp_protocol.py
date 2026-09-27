@@ -64,3 +64,15 @@ async def test_read_only_call_round_trips(wire_env, mock_api):
     assert route.calls.last.request.headers["Authorization"] == "Bearer test-key-wire"
     assert result.structured_content["companyName"] == "Test GmbH"
     assert "Test GmbH" in result.content[0].text
+
+
+async def test_a_tool_call_emits_one_usage_line(wire_env, mock_api, capfd):
+    mock_api.get("/profile").mock(return_value=httpx.Response(200, json={"companyName": "Test GmbH"}))
+    capfd.readouterr()
+    async with Client(mcp) as client:
+        await client.call_tool("get_profile", {})
+    lines = [ln for ln in capfd.readouterr().err.splitlines() if '"mcp_usage"' in ln]
+    assert len(lines) == 1
+    assert '"server": "lexoffice"' in lines[0]
+    assert '"tool": "get_profile"' in lines[0]
+    assert '"outcome": "ok"' in lines[0]

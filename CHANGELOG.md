@@ -1,5 +1,7 @@
 # Changelog
 
+From 2026-09-27 versions are git tags (`vX.Y.Z`) only; release.yml no longer edits this file or pyproject.toml.
+
 ## [0.3.17] - 2026-09-27
 
 - ci: add PR test gate, make tests actually run in release, add MCP protocol tests (#30)

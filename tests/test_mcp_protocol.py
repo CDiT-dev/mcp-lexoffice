@@ -46,8 +46,8 @@ async def test_server_registers_its_tools(wire_env):
 async def test_annotations_survive_the_wire(wire_env):
     async with Client(mcp) as client:
         tools = {t.name: t for t in await client.list_tools()}
-    assert tools["get_profile"].annotations.readOnlyHint is True
-    assert tools["create_draft_invoice"].annotations.destructiveHint is True
+    assert tools["get_profile"].annotations.read_only_hint is True
+    assert tools["create_draft_invoice"].annotations.destructive_hint is True
 
 
 async def test_removed_dead_routes_stay_removed(wire_env):

@@ -243,16 +243,15 @@ async def test_all_tools_registered():
     expected = {
         "get_profile",
         "search_contacts", "get_contact", "create_contact", "update_contact",
-        "create_draft_invoice", "finalize_invoice", "delete_draft_invoice", "send_invoice",
+        "create_draft_invoice", "delete_draft_invoice",
         "get_invoice", "get_invoice_pdf", "list_invoices",
         "upload_voucher", "get_voucher", "update_voucher",
         "list_expenses", "get_financial_overview", "get_payment_status",
-        "create_draft_quotation", "finalize_quotation", "pursue_quotation_to_invoice",
+        "create_draft_quotation", "pursue_quotation_to_invoice",
         "create_dunning", "render_dunning_pdf",
         "list_articles", "create_article", "get_article", "update_article",
         "list_vouchers", "list_payment_conditions", "list_countries",
-        "create_and_send_invoice", "find_or_create_contact",
-        "convert_quotation_and_send", "list_quotations",
+        "find_or_create_contact", "list_quotations",
         "get_contact_invoices", "create_credit_note",
         "list_recurring_templates", "get_recurring_template",
         "create_voucher", "attach_voucher_file", "list_posting_categories",
@@ -262,7 +261,7 @@ async def test_all_tools_registered():
 
 async def test_tool_count():
     tools = await mcp.list_tools()
-    assert len(tools) == 41
+    assert len(tools) == 36
 
 
 # ── Profile tool ─────────────────────────────────────────────────────
@@ -439,71 +438,6 @@ async def test_create_draft_invoice_currency():
     )
     call_data = ctx.lifespan_context["lexoffice"].create_invoice.call_args[0][0]
     assert call_data["totalPrice"]["currency"] == "USD"
-
-
-async def test_finalize_invoice_tool():
-    from mcp_lexoffice.server import finalize_invoice
-
-    ctx = make_ctx({
-        "finalize_invoice": {"id": "inv-1"},
-        "get_invoice": {"id": "inv-1", "voucherNumber": "RE-2026-001", "voucherStatus": "open"},
-    })
-    result = await finalize_invoice(ctx, invoice_id="inv-1")
-    parsed = as_dict(result)
-    assert parsed["voucherNumber"] == "RE-2026-001"
-    assert "deepLink" in parsed
-
-
-async def test_finalize_invoice_deep_link_is_view():
-    """Finalized invoice deep link should use 'view', not 'edit'."""
-    from mcp_lexoffice.server import finalize_invoice
-
-    ctx = make_ctx({
-        "finalize_invoice": {"id": "inv-1"},
-        "get_invoice": {"id": "inv-1", "voucherStatus": "open"},
-    })
-    result = await finalize_invoice(ctx, invoice_id="inv-1")
-    parsed = as_dict(result)
-    assert "/view/" in parsed["deepLink"]
-    assert "/edit/" not in parsed["deepLink"]
-
-
-async def test_send_invoice_blocks_draft():
-    from mcp_lexoffice.server import send_invoice
-
-    ctx = make_ctx({"get_invoice": {"id": "inv-1", "voucherStatus": "draft"}})
-    with pytest.raises(ToolError) as exc:
-        await send_invoice(ctx, invoice_id="inv-1", recipient_email="test@test.de")
-    msg = str(exc.value)
-    assert "draft" in msg.lower()
-    assert "/edit/" in msg
-
-
-async def test_send_invoice_finalized():
-    from mcp_lexoffice.server import send_invoice
-
-    ctx = make_ctx({
-        "get_invoice": {"id": "inv-1", "voucherStatus": "open"},
-        "send_invoice": None,
-    })
-    result = await send_invoice(ctx, invoice_id="inv-1", recipient_email="test@test.de")
-    parsed = as_dict(result)
-    assert parsed["status"] == "sent"
-    assert parsed["recipient"] == "test@test.de"
-    assert parsed["invoice_id"] == "inv-1"
-
-
-async def test_send_invoice_paidoff_status_allowed():
-    """Sending should work for any non-draft status (e.g. paidoff)."""
-    from mcp_lexoffice.server import send_invoice
-
-    ctx = make_ctx({
-        "get_invoice": {"id": "inv-1", "voucherStatus": "paidoff"},
-        "send_invoice": None,
-    })
-    result = await send_invoice(ctx, invoice_id="inv-1", recipient_email="x@y.de")
-    parsed = as_dict(result)
-    assert parsed["status"] == "sent"
 
 
 async def test_get_invoice_tool_deep_link():
@@ -1768,19 +1702,6 @@ async def test_create_draft_quotation_vatfree():
     assert call_data["taxConditions"]["taxType"] == "vatfree"
 
 
-async def test_finalize_quotation_tool():
-    from mcp_lexoffice.server import finalize_quotation
-
-    ctx = make_ctx({
-        "finalize_quotation": {"id": "q-1"},
-        "get_quotation": {"id": "q-1", "voucherNumber": "AG-001", "voucherStatus": "open"},
-    })
-    result = await finalize_quotation(ctx, quotation_id="q-1")
-    parsed = as_dict(result)
-    assert parsed["voucherNumber"] == "AG-001"
-    assert "/view/" in parsed["deepLink"]
-
-
 async def test_pursue_quotation_blocks_draft():
     from mcp_lexoffice.server import pursue_quotation_to_invoice
 
@@ -2284,7 +2205,7 @@ async def test_create_article_tax_rate_override():
 async def test_all_tools_have_annotations():
     """Every tool carries an annotations block with a human title (B)."""
     tools = await mcp.list_tools()
-    assert len(tools) == 41
+    assert len(tools) == 36
     for t in tools:
         assert t.annotations is not None, f"{t.name} missing annotations"
         assert t.annotations.title, f"{t.name} missing annotation title"
@@ -2301,8 +2222,7 @@ async def test_read_tools_marked_read_only():
 async def test_irreversible_tools_marked_destructive():
     """Finalize/send/delete carry destructiveHint so clients can warn before running them."""
     tools = {t.name: t for t in await mcp.list_tools()}
-    for name in ("finalize_invoice", "send_invoice", "delete_draft_invoice",
-                 "finalize_quotation", "create_and_send_invoice", "convert_quotation_and_send"):
+    for name in ("create_draft_invoice", "create_draft_quotation", "delete_draft_invoice"):
         assert tools[name].annotations.destructiveHint is True, name
 
 
@@ -2310,7 +2230,7 @@ async def test_tools_carry_tags():
     """Tags replace the manual [finance] docstring prefix for client-side filtering."""
     tools = {t.name: t for t in await mcp.list_tools()}
     assert "finance" in tools["get_profile"].tags
-    assert "irreversible" in tools["finalize_invoice"].tags
+    assert "irreversible" in tools["create_draft_invoice"].tags
     assert "belegfaenger" in tools["create_voucher"].tags
 
 
@@ -2373,15 +2293,15 @@ async def test_typed_output_schema_coverage():
     tools = {t.name: t for t in await mcp.list_tools()}
     # The high-value object/collection returns are typed.
     typed = [
-        "get_profile", "create_draft_invoice", "finalize_invoice", "get_invoice", "list_invoices",
+        "get_profile", "create_draft_invoice", "get_invoice", "list_invoices",
         "list_expenses", "get_financial_overview", "search_contacts", "get_contact",
-        "create_contact", "update_contact", "create_draft_quotation", "finalize_quotation",
+        "create_contact", "update_contact", "create_draft_quotation",
         "pursue_quotation_to_invoice", "create_dunning", "list_articles", "create_article",
         "get_article", "update_article", "list_vouchers", "get_voucher", "update_voucher",
         "create_voucher", "attach_voucher_file", "upload_voucher", "get_recurring_template",
-        "create_and_send_invoice", "find_or_create_contact", "convert_quotation_and_send",
+        "find_or_create_contact",
         "list_quotations", "get_contact_invoices", "create_credit_note", "get_invoice_pdf",
-        "render_dunning_pdf", "send_invoice", "delete_draft_invoice",
+        "render_dunning_pdf", "delete_draft_invoice",
         # pass-3: the four bare-array tools now advertise a typed list[Model] schema (additive).
         "list_countries", "list_posting_categories", "list_payment_conditions",
         "list_recurring_templates",
@@ -2460,15 +2380,11 @@ async def test_array_tool_text_content_backward_compatible(tool_name, method, pa
 
 
 @pytest.mark.parametrize("tool_name,kwargs,ctx_responses,needle", [
-    ("send_invoice", {"invoice_id": "i", "recipient_email": "x@y.de"},
-     {"get_invoice": {"id": "i", "voucherStatus": "draft"}}, "draft"),
     ("delete_draft_invoice", {"invoice_id": "i"},
      {"get_invoice": {"id": "i", "voucherStatus": "open"}}, "Only drafts"),
     ("create_contact", {}, {}, "company_name"),
     ("get_payment_status", {}, {}, "invoice_id"),
     ("pursue_quotation_to_invoice", {"quotation_id": "q"},
-     {"get_quotation": {"id": "q", "voucherStatus": "draft"}}, "draft"),
-    ("convert_quotation_and_send", {"quotation_id": "q", "recipient_email": "x@y.de"},
      {"get_quotation": {"id": "q", "voucherStatus": "draft"}}, "draft"),
     ("attach_voucher_file", {"voucher_id": "v", "file_content": "abc", "file_name": "x.txt"},
      {}, "Unsupported"),
@@ -2517,8 +2433,7 @@ async def test_get_contact_invoices_guardrails_raise():
 @pytest.mark.parametrize("model_name", [
     "Profile", "Invoice", "VoucherList", "VoucherListEntry", "Contact", "ContactList",
     "Quotation", "Article", "ArticleList", "Voucher", "CreateVoucherResult", "CreditNote",
-    "Dunning", "RecurringTemplate", "DocumentRef", "FileRef", "SendResult", "DeleteResult",
-    "SentInvoiceResult",
+    "Dunning", "RecurringTemplate", "DocumentRef", "FileRef", "DeleteResult",
 ])
 def test_models_validate_error_payload(model_name):
     """Every output model must validate the {'error': ...} short-circuit payload (the exact
@@ -2613,11 +2528,11 @@ async def test_typed_tool_error_path_raises_tool_error():
     """A tool that short-circuits on a guardrail now raises ToolError (unified error signal),
     so clients can distinguish a real failure from a successful result — instead of receiving
     a 200 {"error": ...} success envelope."""
-    from mcp_lexoffice.server import send_invoice
+    from mcp_lexoffice.server import pursue_quotation_to_invoice
 
-    ctx = make_ctx({"get_invoice": {"id": "inv-1", "voucherStatus": "draft"}})
+    ctx = make_ctx({"get_quotation": {"id": "q-1", "voucherStatus": "draft"}})
     with pytest.raises(ToolError) as exc:
-        await send_invoice(ctx, invoice_id="inv-1", recipient_email="x@y.de")
+        await pursue_quotation_to_invoice(ctx, quotation_id="q-1")
     msg = str(exc.value)
     assert "draft" in msg.lower()
     assert "/edit/" in msg
@@ -2631,8 +2546,7 @@ async def test_irreversible_tools_carry_write_and_irreversible_tags():
     client/portal can gate them. Tags are additive metadata — names/params/returns unchanged."""
     tools = {t.name: t for t in await mcp.list_tools()}
     irreversible = (
-        "send_invoice", "finalize_invoice", "finalize_quotation",
-        "convert_quotation_and_send", "create_and_send_invoice", "create_dunning",
+        "create_draft_invoice", "create_draft_quotation", "create_dunning",
     )
     for name in irreversible:
         assert "write" in tools[name].tags, f"{name} missing 'write' tag"

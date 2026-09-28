@@ -23,7 +23,7 @@ from mcp_lexoffice.server import mcp
 
 EXPECTED_TOOLS = {
     "get_profile", "get_invoice", "list_invoices", "create_draft_invoice",
-    "finalize_invoice", "send_invoice", "search_contacts", "create_voucher",
+    "search_contacts", "create_voucher",
     "get_financial_overview", "list_countries",
 }
 
@@ -47,7 +47,32 @@ async def test_annotations_survive_the_wire(wire_env):
     async with Client(mcp) as client:
         tools = {t.name: t for t in await client.list_tools()}
     assert tools["get_profile"].annotations.readOnlyHint is True
-    assert tools["send_invoice"].annotations.destructiveHint is True
+    assert tools["create_draft_invoice"].annotations.destructiveHint is True
+
+
+async def test_removed_dead_routes_stay_removed(wire_env):
+    """CDI-1905: Lexoffice has no /finalize or /send routes; those tools must not return."""
+    async with Client(mcp) as client:
+        names = {t.name for t in await client.list_tools()}
+    assert not names & {"finalize_invoice", "finalize_quotation", "send_invoice",
+                        "create_and_send_invoice", "convert_quotation_and_send"}
+
+
+async def test_create_draft_invoice_finalize_hits_create_with_query(wire_env, mock_api):
+    """CDI-1905: finalizing is only POST /invoices?finalize=true at create time."""
+    mock_api.get("/profile").respond(200, json={"taxType": "net"})
+    create = mock_api.post("/invoices", params={"finalize": "true"}).respond(
+        200, json={"id": "inv-9", "version": 1}
+    )
+    mock_api.post("/invoices").respond(500)  # any other POST shape is a bug
+    async with Client(mcp) as client:
+        await client.call_tool("create_draft_invoice", {
+            "recipient_name": "Acme", "finalize": True,
+            "line_items": [{"name": "Consulting", "unit_price": 150}],
+        })
+    assert create.call_count == 1
+    assert create.calls.last.request.url.params["finalize"] == "true"
+    assert not any("/finalize" in str(c.request.url.path) for c in mock_api.calls)
 
 
 async def test_read_only_call_round_trips(wire_env, mock_api):

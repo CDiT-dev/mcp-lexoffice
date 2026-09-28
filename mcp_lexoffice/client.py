@@ -163,24 +163,6 @@ class LexofficeClient:
         result["_resolvedVia"] = "vouchers"
         return result
 
-    async def finalize_invoice(self, invoice_id: str) -> dict:
-        resp = await self._request("GET", f"/invoices/{invoice_id}")
-        data = resp.json()
-        version = data.get("version", 0)
-        resp = await self._request(
-            "POST",
-            f"/invoices/{invoice_id}/finalize",
-            json={"id": invoice_id, "version": version},
-        )
-        return resp.json()
-
-    async def send_invoice(self, invoice_id: str, recipient_email: str) -> None:
-        await self._request(
-            "POST",
-            f"/invoices/{invoice_id}/send",
-            json={"recipientEmailAddresses": [recipient_email]},
-        )
-
     async def render_invoice_document(self, invoice_id: str) -> dict:
         resp = await self._request("GET", f"/invoices/{invoice_id}/document")
         return resp.json()
@@ -208,17 +190,6 @@ class LexofficeClient:
 
     async def get_quotation(self, quotation_id: str) -> dict:
         resp = await self._request("GET", f"/quotations/{quotation_id}")
-        return resp.json()
-
-    async def finalize_quotation(self, quotation_id: str) -> dict:
-        resp = await self._request("GET", f"/quotations/{quotation_id}")
-        data = resp.json()
-        version = data.get("version", 0)
-        resp = await self._request(
-            "POST",
-            f"/quotations/{quotation_id}/finalize",
-            json={"id": quotation_id, "version": version},
-        )
         return resp.json()
 
     async def pursue_quotation(self, quotation_id: str) -> dict:

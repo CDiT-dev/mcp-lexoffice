@@ -1999,12 +1999,13 @@ async def test_list_countries_tool():
 # ── main() transport ─────────────────────────────────────────────────
 
 
-def test_main_defaults_to_streamable_http():
+def test_main_http_transport_runs_stateless_http():
+    # The transport comes from settings (the same source as the auth guard),
+    # not from a separate env default; unset means stdio, see test_transport_guard.
     with (
-        patch.dict(os.environ, {}, clear=False),
         patch("mcp_lexoffice.server.mcp") as mock_mcp,
+        patch("mcp_lexoffice.server._settings.mcp_transport", "streamable-http"),
     ):
-        os.environ.pop("MCP_TRANSPORT", None)
         from mcp_lexoffice.server import main
 
         main()

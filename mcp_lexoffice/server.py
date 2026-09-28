@@ -2280,7 +2280,10 @@ async def _healthz(request: _SReq) -> _SResp:
 def main():
     import os
 
-    transport = os.environ.get("MCP_TRANSPORT", "streamable-http")
+    # Same source as the auth guard above, so "no key" can never mean an
+    # unauthenticated HTTP server (the old env default here was HTTP while
+    # the guard's settings default was stdio).
+    transport = _settings.mcp_transport
     host = os.environ.get("MCP_HOST", "0.0.0.0")
     port = int(os.environ.get("MCP_PORT", "8000"))
 

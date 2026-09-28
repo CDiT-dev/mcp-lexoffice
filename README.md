@@ -1,286 +1,227 @@
 # mcp-lexoffice
 
-MCP server for **Lexware Office** (formerly Lexoffice) — a Python-based accounting integration that exposes 36 tools for invoices, contacts, quotations, dunnings, articles, recurring templates, credit notes, financial queries, and voucher management.
+An MCP server for **Lexware Office**, the German accounting service formerly called **Lexoffice**. It gives an MCP client (Claude, n8n, or any other MCP host) 36 tools for invoices, quotations, contacts, credit notes, dunnings, articles, recurring templates, vouchers (Belege) and financial queries, all through the official Lexware Office REST API. It is meant for freelancers and small businesses who already keep their books in Lexware Office and want an assistant to draft invoices, capture receipts and check who still owes them money.
 
-Built with [FastMCP 4](https://github.com/jlowin/fastmcp). In production it is reached through the Cloudflare MCP portal with a bearer token.
+Built with [FastMCP](https://github.com/PrefectHQ/fastmcp) 4 (`fastmcp>=4.0.10,<5.0.0`).
 
-## Quick Start
+## Requirements
+
+- Python 3.11 or newer
+- [uv](https://docs.astral.sh/uv/)
+- A Lexware Office account with a public API key
+- Docker with Compose, if you want to run it as a container
+
+## Install and run
+
+### Local
 
 ```bash
-# Clone and set up
 git clone https://github.com/CDiT-dev/mcp-lexoffice.git
 cd mcp-lexoffice
-python -m venv .venv
-source .venv/bin/activate
-pip install -e .
-
-# Configure
-cp .env.example .env
-# Edit .env and add your Lexoffice API key
-
-# Run
-python -m mcp_lexoffice.server
+uv sync
+cp .env.example .env   # then fill in LEXOFFICE_API_KEY and MCP_API_KEY
 ```
 
-The server starts on `http://0.0.0.0:8000` with streamable-http transport. Set `MCP_TRANSPORT=streamable-http` and `MCP_API_KEY` explicitly (the `.env.example` does): the missing-key guard reads `MCP_TRANSPORT`, so with it unset the server runs HTTP unauthenticated.
+stdio, for a local MCP client such as Claude Code or Claude Desktop:
 
-## Authentication
-
-Two credentials are involved:
-
-- `LEXOFFICE_API_KEY`: the server's token for the Lexware Office API.
-- `MCP_API_KEY`: the bearer token MCP clients must send (`Authorization: Bearer <key>`). Required in HTTP mode; the server refuses to start without it. There is no OAuth.
-
-Ways to provide `LEXOFFICE_API_KEY`:
-
-### 1. Environment variable (recommended for production)
 ```bash
-export LEXOFFICE_API_KEY=your-api-key-here
-python -m mcp_lexoffice.server
+MCP_TRANSPORT=stdio uv run mcp-lexoffice
 ```
 
-### 2. `.env` file (recommended for local development)
+Streamable HTTP, for a remote client:
+
 ```bash
-# .env
-LEXOFFICE_API_KEY=your-api-key-here
-```
-The server loads `.env` automatically via `python-dotenv`.
-
-### Getting an API key
-
-1. Log in to [app.lexoffice.de](https://app.lexoffice.de)
-2. Go to **Settings** (Einstellungen) > **API**
-3. Generate a new API key
-4. The key has full access to your Lexoffice account — treat it as a secret
-
-## Configuration
-
-All configuration is via environment variables:
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `LEXOFFICE_API_KEY` | *(required)* | Lexoffice API Bearer token |
-| `MCP_API_KEY` | *(required for HTTP)* | Bearer token MCP clients must send |
-| `LEXOFFICE_TAX_TYPE` | *(auto-detect)* | Override tax regime: `vatfree`, `net`, or `gross` |
-| `MCP_TRANSPORT` | `streamable-http` | Transport: `streamable-http` or `stdio` |
-| `MCP_HOST` | `0.0.0.0` | Bind address |
-| `MCP_PORT` | `8000` | Port number |
-
-## Running
-
-### Local development (stdio for Claude Code)
-```bash
-source .venv/bin/activate
-MCP_TRANSPORT=stdio python -m mcp_lexoffice.server
+MCP_TRANSPORT=streamable-http MCP_API_KEY=change-me uv run mcp-lexoffice
+# listens on http://0.0.0.0:8000/mcp
 ```
 
-### HTTP server (for Claude.ai connector)
-```bash
-source .venv/bin/activate
-python -m mcp_lexoffice.server
-# Listens on http://0.0.0.0:8000/mcp
+`MCP_TRANSPORT` defaults to `stdio` when unset. The `.env.example` sets it to `streamable-http`, so with a copied `.env` the server starts in HTTP mode and needs `MCP_API_KEY`.
+
+A client config for stdio:
+
+```json
+{
+  "mcpServers": {
+    "lexoffice": {
+      "command": "uv",
+      "args": ["--directory", "/path/to/mcp-lexoffice", "run", "mcp-lexoffice"],
+      "env": { "MCP_TRANSPORT": "stdio", "LEXOFFICE_API_KEY": "your-api-key" }
+    }
+  }
+}
 ```
 
 ### Docker
+
 ```bash
-docker compose up --build
+LEXOFFICE_API_KEY=... MCP_API_KEY=... docker compose up --build
 ```
 
-The `docker-compose.yml` supports a `HOST_PORT` variable to remap the host port:
-```bash
-HOST_PORT=8001 docker compose up --build
-```
+The Compose file builds the image from source, runs streamable HTTP, and uses host networking. The listening port comes from `HOST_PORT` (default `8001`), so the endpoint is `http://localhost:8001/mcp`. `GET /health` (and `/healthz`) returns status, version and uptime; the container health check uses it.
 
-### Docker with Komodo (git deploy)
+## Configuration
 
-The server is designed for deployment via [Komodo](https://komo.do) with git-based stacks:
+All configuration comes from environment variables or a `.env` file in the working directory.
 
-1. Create a Komodo Repo pointing to the GitHub repository
-2. Create a Komodo Stack on your target server with `run_build=true`
-3. Set `LEXOFFICE_API_KEY` in the stack's environment
-4. Deploy — Komodo clones, builds the Docker image, and runs it
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `LEXOFFICE_API_KEY` | *(required)* | Lexware Office API token. Startup fails without it. |
+| `MCP_API_KEY` | *(empty)* | Bearer token that MCP clients must send. Required for HTTP transport. |
+| `MCP_TRANSPORT` | `stdio` | `stdio`, `streamable-http`, or `http` (an alias for `streamable-http`). The Docker image sets `streamable-http`. |
+| `MCP_HOST` | `0.0.0.0` | Bind address for HTTP transport. |
+| `MCP_PORT` | `8000` | Port for HTTP transport. |
+| `LEXOFFICE_TAX_TYPE` | *(auto-detect)* | Force the tax regime: `vatfree`, `net`, or `gross`. |
+| `APP_VERSION` | *(package version)* | Version reported by `/health` and `lexoffice://status`. Set by the release build. |
+| `HOST_PORT` | `8001` | Compose only: the port the container listens on. |
 
-## Client access
+## Authentication
 
-Production clients (Claude.ai, Claude Code, n8n) reach the server through the Cloudflare MCP
-portal, which holds `MCP_API_KEY` as its upstream bearer. For a direct connection, send
-`Authorization: Bearer $MCP_API_KEY` to `https://<host>/mcp`. New tools or parameters need a
-portal catalog refresh before portal clients see them.
+There are two separate credentials.
 
-## Tools Reference
+- **Upstream (Lexware Office).** `LEXOFFICE_API_KEY` is sent as a bearer token to the Lexware Office API. Create one in the Lexware Office web app ([app.lexoffice.de](https://app.lexoffice.de)) under Settings (Einstellungen), Public API. The key has full access to the account, so treat it as a secret.
+- **Clients (this server).** In HTTP mode every request must carry `Authorization: Bearer <MCP_API_KEY>`. The token is compared in constant time. If `MCP_API_KEY` is empty in HTTP mode, the server exits at startup instead of running unauthenticated. There is no OAuth. In stdio mode the client launches the server as a local process and no bearer token is used.
 
-### Invoices (Invoice Lifecycle)
+For a public deployment, put the server behind a reverse proxy or MCP gateway that terminates TLS and holds the bearer token.
 
-| Tool | Description |
-|------|-------------|
-| `create_draft_invoice` | Create an invoice with named parameters (recipient, line items, payment terms). Draft by default; `finalize=true` finalizes on create (**cannot be undone**). Returns ID + Lexoffice deep link. |
-| `delete_draft_invoice` | Delete a draft invoice (drafts only; finalized invoices cannot be deleted). |
-| `get_invoice` | Get full invoice details with deep link (edit link for drafts, view link for finalized). |
-| `get_invoice_pdf` | Render and get the document file ID for a finalized invoice PDF. |
-| `list_invoices` | List sales invoices with status filter. Computes `daysOverdue` for overdue items. |
+## Tools
 
-**Invoice flow**: `create_draft_invoice` (optionally `finalize=true`) → send from the Lexoffice UI. Lexoffice only supports finalizing at create time (`POST /invoices?finalize=true`); there is no finalize or send endpoint for an existing invoice.
+Tool failures (bad input, unknown contact, unsupported file type) raise an MCP `ToolError`, so the client gets a clear error message. Every tool carries MCP annotations (`readOnlyHint`, `destructiveHint`, `idempotentHint`) and a human-readable title.
 
-### Financial Queries
+### Invoices
 
 | Tool | Description |
 |------|-------------|
-| `list_expenses` | List purchase invoices/expenses with status filter. |
-| `get_financial_overview` | Monthly revenue/expense/net breakdown. Includes open and overdue invoice counts. |
-| `get_payment_status` | Check payment status by invoice ID or contact name. |
+| `create_draft_invoice` | Create an invoice from named parameters (recipient, line items, payment terms). Draft by default; `finalize=true` finalizes on create, which assigns the invoice number and cannot be undone. |
+| `delete_draft_invoice` | Delete a draft invoice. Finalized invoices cannot be deleted. |
+| `get_invoice` | Full invoice details with a deep link into Lexware Office. |
+| `get_invoice_pdf` | Render a finalized invoice and return the document file ID. |
+| `list_invoices` | List sales invoices by status; computes `daysOverdue` for overdue items. |
 
-### Contacts
-
-| Tool | Description |
-|------|-------------|
-| `search_contacts` | Search by name, email, or role (customer/vendor). |
-| `get_contact` | Get full contact details with deep link. |
-| `create_contact` | Create a company or person contact with named parameters. |
-| `update_contact` | Update contact fields with optimistic locking (version). |
-| `find_or_create_contact` | Idempotent lookup-or-create by name/email — returns existing match or creates a new contact. |
-| `get_contact_invoices` | List the invoices belonging to a given contact. |
+The Lexware Office API only allows finalizing at create time (`POST /invoices?finalize=true`). It has no endpoint to finalize an existing draft or to email an invoice, so this server has no finalize or send tool. Send invoices from the Lexware Office web app.
 
 ### Quotations (Angebote)
 
 | Tool | Description |
 |------|-------------|
-| `create_draft_quotation` | Create a quotation with the same interface as invoices; `finalize=true` finalizes on create (**cannot be undone**). |
-| `pursue_quotation_to_invoice` | Convert a finalized quotation to a new draft invoice (Angebot → Rechnung). |
-| `list_quotations` | List quotations with status filter. |
+| `create_draft_quotation` | Create a quotation with the same interface as invoices; `finalize=true` finalizes on create. |
+| `pursue_quotation_to_invoice` | Turn a finalized quotation into a new draft invoice. |
+| `list_quotations` | List quotations by status. |
 
-### Recurring Templates (Wiederkehrende Rechnungen)
-
-| Tool | Description |
-|------|-------------|
-| `list_recurring_templates` | List configured recurring invoice templates. |
-| `get_recurring_template` | Get a recurring template's details. |
-
-### Credit Notes (Gutschriften)
+### Contacts
 
 | Tool | Description |
 |------|-------------|
-| `create_credit_note` | Create a credit note (Gutschrift), optionally linked to a contact. |
+| `search_contacts` | Search by name, email, or role (customer or vendor). |
+| `get_contact` | Full contact details with a deep link. |
+| `create_contact` | Create a company or person contact. |
+| `update_contact` | Update a contact (optimistic locking via `version`). |
+| `find_or_create_contact` | Return a matching contact by name or email, or create one. |
+| `get_contact_invoices` | List the invoices for one contact. |
 
-### Dunnings (Mahnungen)
-
-| Tool | Description |
-|------|-------------|
-| `create_dunning` | Create a payment reminder for an overdue invoice. |
-| `render_dunning_pdf` | Render a dunning PDF and get the document file ID. |
-
-### Articles (Service Catalog)
+### Financial queries
 
 | Tool | Description |
 |------|-------------|
-| `list_articles` | List all configured service articles. |
-| `create_article` | Create a reusable service item (e.g., "Consulting", "Sprechstunde"). |
-| `get_article` | Get article details. |
-| `update_article` | Update article with optimistic locking. |
+| `list_expenses` | List purchase invoices and expenses by status. |
+| `get_financial_overview` | Monthly revenue, expenses and net, plus open and overdue invoice counts. |
+| `get_payment_status` | Payment status by invoice ID or contact name. |
+
+### Recurring templates, credit notes, dunnings
+
+| Tool | Description |
+|------|-------------|
+| `list_recurring_templates` | List recurring invoice templates. |
+| `get_recurring_template` | Details of one recurring template. |
+| `create_credit_note` | Create a credit note (Gutschrift). |
+| `create_dunning` | Create a payment reminder (Mahnung) for an overdue invoice. |
+| `render_dunning_pdf` | Render a dunning and return the document file ID. |
+
+### Articles
+
+| Tool | Description |
+|------|-------------|
+| `list_articles` | List service articles. |
+| `create_article` | Create a reusable article, for example an hourly consulting rate. |
+| `get_article` | Article details. |
+| `update_article` | Update an article (optimistic locking). |
 
 ### Vouchers (Belege)
 
 | Tool | Description |
 |------|-------------|
-| `upload_voucher` | Upload a raw bill/receipt file (PDF, PNG, JPG) to Lexoffice Beleg-Eingang ("Zu prüfen"). Max 5MB. |
-| `create_voucher` | Create a structured purchase invoice (amount + vendor + category), optional PDF attach and read-back. |
-| `attach_voucher_file` | Attach a file to an existing voucher (multipart upload). |
-| `get_voucher` | Get a voucher's details. |
-| `update_voucher` | Update a voucher with optimistic locking. |
-| `list_vouchers` | Generic voucher list query by type and status. |
-| `list_posting_categories` | List Buchungskonten (posting categories) for voucher categorization. |
+| `upload_voucher` | Upload a raw receipt file (PDF, PNG, JPG, max 5 MB) to the voucher inbox for review. |
+| `create_voucher` | Create a structured purchase voucher (amount, vendor, posting category), with optional file attach and read-back. |
+| `attach_voucher_file` | Attach a file to an existing voucher. |
+| `get_voucher` | Voucher details. |
+| `update_voucher` | Update a voucher (optimistic locking). |
+| `list_vouchers` | Generic voucher list by type and status. |
+| `list_posting_categories` | List posting categories (Buchungskonten) for voucher categorization. |
 
 ### Utilities
 
 | Tool | Description |
 |------|-------------|
-| `get_profile` | Get organization profile (company name, tax settings). |
-| `list_payment_conditions` | List configured payment terms. |
-| `list_countries` | List countries with tax classification. |
+| `get_profile` | Organization profile (company name, tax settings). |
+| `list_payment_conditions` | Configured payment terms. |
+| `list_countries` | Countries with tax classification. |
 
-## Resources & Prompts
+## Resources and prompts
 
-In addition to tools, the server exposes MCP **resources** (reference/context data the model can
-pull without a tool call) under the `lexoffice://` scheme:
+Resources under the `lexoffice://` scheme give the model reference data without a tool call:
 
-- `lexoffice://service-catalog` — standard offerings + pricing (static)
-- `lexoffice://countries`, `lexoffice://posting-categories`, `lexoffice://payment-conditions` — live API reference data
-- `lexoffice://tax-config` — auto-detected tax regime + default VAT rate
-- `lexoffice://status` — service name, version, uptime (mirrors `/health`)
-- `lexoffice://contacts/{contact_id}/invoices` — per-contact invoice list (resource template)
+- `lexoffice://service-catalog`: standard offerings and prices (static)
+- `lexoffice://countries`, `lexoffice://posting-categories`, `lexoffice://payment-conditions`: live reference data from the API
+- `lexoffice://tax-config`: detected tax regime and default VAT rate
+- `lexoffice://status`: service name, version and uptime
+- `lexoffice://contact/{contact_id}/invoices`: invoices for one contact (resource template)
 
-And guided-workflow **prompts**:
+Prompts for guided workflows:
 
-- `monthly_close` — overview → overdue invoices → suggested dunnings
-- `dunning_run` — find overdue open invoices and walk creating Mahnungen
-- `capture_receipt` — Belegfänger flow: `find_or_create_contact` → `create_voucher` (+ optional PDF)
+- `monthly_close`: overview, then overdue invoices, then suggested dunnings
+- `dunning_run`: find overdue open invoices and create reminders
+- `capture_receipt`: `find_or_create_contact`, then `create_voucher` with an optional PDF
 
-## Tax Configuration
+## Tax regime
 
-The tax regime is **auto-detected** from the Lexware Office profile API (`GET /v1/profile` → `taxType`):
+The tax regime is read from the Lexware Office profile (`GET /v1/profile`, field `taxType`) on first use and cached until restart.
 
-| Regime | `taxType` | Default Rate |
+| Regime | `taxType` | Default rate |
 |--------|-----------|-------------|
 | Kleinunternehmerregelung | `vatfree` | 0% |
-| Netto (regular VAT) | `net` | 19% |
-| Brutto (gross VAT) | `gross` | 19% |
+| Net prices | `net` | 19% |
+| Gross prices | `gross` | 19% |
 
-- The result is lazy-cached for the server's lifetime (restart to refresh)
-- Override with `LEXOFFICE_TAX_TYPE` env var for testing: `LEXOFFICE_TAX_TYPE=net python -m mcp_lexoffice.server`
-- Per-item `tax_rate` override is available on `create_draft_invoice`, `create_draft_quotation`, and `create_article`
+`LEXOFFICE_TAX_TYPE` overrides detection. `create_draft_invoice`, `create_draft_quotation` and `create_article` also accept a per-item `tax_rate`.
 
-## Rate Limiting
+## Rate limiting
 
-The Lexoffice API enforces a **2 requests/second** rate limit. The client handles this with:
-- An asyncio semaphore limiting concurrent requests to 2
-- Automatic retry on HTTP 429 responses, respecting the `Retry-After` header
+The Lexware Office API allows 2 requests per second. The client limits concurrency to 2 and retries HTTP 429 responses, honoring `Retry-After`.
 
-## Testing
+## Usage telemetry
+
+A small middleware (`mcp_lexoffice/usage.py`) writes one JSON line per tool call to stderr with the server name, tool name, duration, outcome and negotiated MCP protocol version. It never logs arguments or results, and it sends nothing anywhere; the lines stay in your process logs.
+
+## Development
 
 ```bash
 uv sync
-uv run pytest tests/ -v
+uv run pytest
 ```
 
-The test suite includes 297 tests covering:
-- All 36 MCP tools with parameter variations
-- Client HTTP methods with respx mocks
-- 429 retry logic and rate limiting
-- Error propagation (400, 401, 403, 404, 409, 422, 500)
-- File upload validation (type, size)
-- Helper functions (_build_line_items, _build_address, _deep_link)
-- Multi-tax-regime detection, caching, env override, and per-item rates
-- Overdue calculation edge cases
+Tests mock the Lexware Office API with `respx` and use FastMCP's in-memory client for the protocol surface, so they need no API key or network access.
 
-## Project Structure
+CI (`.github/workflows/ci.yml`) runs the test suite in a job named `test`. `main` is protected: changes go through a pull request, and the `test` check must pass before merge.
 
-```
-mcp-lexoffice/
-  mcp_lexoffice/
-    __init__.py
-    client.py          # Async HTTP client (httpx, rate limiting, 429 retry)
-    config.py          # pydantic-settings env surface
-    server.py           # FastMCP 4 server with 36 tools
-  tests/
-    conftest.py         # Shared fixtures (respx mock, test client)
-    test_client.py      # Client unit tests
-    test_server.py      # Server/tool unit tests
-    test_mcp_protocol.py # Protocol surface via the in-memory client
-  .env.example          # Environment variable template
-  docker-compose.yml    # Docker Compose for deployment
-  Dockerfile            # Python 3.12-slim with health check
-  pyproject.toml        # Dependencies and project metadata
-  CLAUDE.md             # Claude Code project instructions
-```
+## Releases
 
-## Dependencies
+Releases are tag-only; no commit bumps a version number. When a change lands on `main`, `.github/workflows/release.yml` runs the tests and `pip-audit`, pushes the next patch tag (`vX.Y.Z`) and builds a container image with that version. The version in `pyproject.toml` only seeds the first tag. The Compose file does not use the published image; it builds from source.
 
-- **[FastMCP](https://github.com/jlowin/fastmcp)** >= 4.0.10, < 5.0.0 — MCP server framework
-- **[httpx](https://www.python-httpx.org/)** >= 0.28.0 — Async HTTP client
-- **[pydantic](https://docs.pydantic.dev/)** >= 2.10 / **pydantic-settings** >= 2.12 — typed models & settings
-- **[python-dotenv](https://github.com/theskumar/python-dotenv)** >= 1.0.0 — `.env` file loading
+## Support
+
+If this server saves you time, you can [buy me a coffee](https://buymeacoffee.com/caseyberlin).
 
 ## License
 
-AGPL-3.0 — see [LICENSE](LICENSE).
+AGPL-3.0. See [LICENSE](LICENSE).
 
-Commercial licensing available for enterprise and partner integrations — contact casey@caseydoes.it.
+Commercial licensing is available for enterprise and partner integrations. Contact casey@caseydoes.it.

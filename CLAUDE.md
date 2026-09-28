@@ -1,12 +1,12 @@
 # mcp-lexoffice
 
-MCP server for **Lexware Office** (formerly Lexoffice) — Python + FastMCP 3.
+MCP server for **Lexware Office** (formerly Lexoffice) — Python + FastMCP 4.
 
 ## Stack
-- Python 3.11+, FastMCP `>=3.4.2,<4.0.0`, httpx, python-dotenv
-- Lexware Office REST API (`https://api.lexoffice.io/v1`)
-- Transport: streamable-http with `json_response=True` (port 8000)
-- Auth: Bearer token from env/.env (with `op://` 1Password fallback)
+- Python 3.11+, FastMCP `>=4.0.10,<5.0.0`, httpx, pydantic-settings (`config.py`)
+- Lexware Office REST API (`https://api.lexoffice.io/v1`), token `LEXOFFICE_API_KEY`
+- Transport: streamable-http, `json_response=True`, `stateless_http=True` (port 8000)
+- Auth: static bearer `MCP_API_KEY` (`auth.py::BearerTokenVerifier`), the only auth path. No Keycloak/OAuth, no `op://` resolution; stale references to either are wrong.
 
 ## Running
 ```bash
@@ -17,9 +17,17 @@ LEXOFFICE_API_KEY='op://Vault/item-id/API key' python -m mcp_lexoffice.server
 ```
 
 ## Deployment
-- Docker container (see `docker-compose.yml`)
-- Reverse proxy (Caddy/nginx) recommended for HTTPS
-- Configurable host port via `HOST_PORT` env var
+- Komodo stack `git-mcp-lexoffice` builds from source (`docker-compose.yml`: `build: .`, `network_mode: host`, host port `HOST_PORT`, default 8001). A merge to `main` is the deploy.
+- Release is tag-only: `release.yml` tests, runs pip-audit, tags the next patch and pushes a GHCR image built with `APP_VERSION`. The stack does not use that image and passes no `APP_VERSION`, so production `/health` reports the static `pyproject.toml` version, which lags the tags.
+- Clients reach it through the Cloudflare MCP portal, which holds `MCP_API_KEY`.
+
+## fastmcp 4 idioms
+- Fleet conventions (tag-only releases, bearer `MCP_API_KEY`, usage telemetry, long-job pattern): `CDiT-infrastructure/docs/wiki/topics/mcp-fleet.md`.
+- Tests: the `mcp-testing` skill (in-memory `Client(mcp)`, protocol surface in `tests/test_mcp_protocol.py`).
+- Release/deploy workflow changes: the `cdit-release-pipeline` skill.
+- `main` is protected: branch, PR, the `test` check must pass.
+- The portal forwards no elicitation or other server-to-client requests; never block a tool on one. New tools/params need a portal catalog refresh.
+- `usage.py` is vendored unchanged into every fleet server; do not fork it here.
 
 ## Tax Configuration
 - Auto-detected from the Lexoffice profile API (`GET /v1/profile` → `taxType`)
@@ -93,5 +101,6 @@ Reference/context data exposed as resources so the model can pull it without a t
 ## Testing
 ```bash
 uv sync
-uv run pytest tests/ -v  # 297 tests
+uv run pytest tests/ -v
+uv run ruff check .
 ```

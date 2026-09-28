@@ -2,7 +2,7 @@
 
 MCP server for **Lexware Office** (formerly Lexoffice) — a Python-based accounting integration that exposes 36 tools for invoices, contacts, quotations, dunnings, articles, recurring templates, credit notes, financial queries, and voucher management.
 
-Built with [FastMCP 3](https://github.com/jlowin/fastmcp) and designed to work as a **Claude.ai custom connector**.
+Built with [FastMCP 4](https://github.com/jlowin/fastmcp). In production it is reached through the Cloudflare MCP portal with a bearer token.
 
 ## Quick Start
 
@@ -22,11 +22,16 @@ cp .env.example .env
 python -m mcp_lexoffice.server
 ```
 
-The server starts on `http://0.0.0.0:8000` with streamable-http transport.
+The server starts on `http://0.0.0.0:8000` with streamable-http transport. Set `MCP_TRANSPORT=streamable-http` and `MCP_API_KEY` explicitly (the `.env.example` does): the missing-key guard reads `MCP_TRANSPORT`, so with it unset the server runs HTTP unauthenticated.
 
 ## Authentication
 
-The server uses a **Bearer token** from the Lexware Office API. Three ways to provide it:
+Two credentials are involved:
+
+- `LEXOFFICE_API_KEY`: the server's token for the Lexware Office API.
+- `MCP_API_KEY`: the bearer token MCP clients must send (`Authorization: Bearer <key>`). Required in HTTP mode; the server refuses to start without it. There is no OAuth.
+
+Ways to provide `LEXOFFICE_API_KEY`:
 
 ### 1. Environment variable (recommended for production)
 ```bash
@@ -41,13 +46,6 @@ LEXOFFICE_API_KEY=your-api-key-here
 ```
 The server loads `.env` automatically via `python-dotenv`.
 
-### 3. 1Password CLI reference (for secure local development)
-```bash
-# .env or environment
-LEXOFFICE_API_KEY=op://Vault/lexoffice/API key
-```
-If the value starts with `op://`, the server resolves it via `op read` at startup. Requires the [1Password CLI](https://developer.1password.com/docs/cli/) to be installed and authenticated.
-
 ### Getting an API key
 
 1. Log in to [app.lexoffice.de](https://app.lexoffice.de)
@@ -61,9 +59,10 @@ All configuration is via environment variables:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `LEXOFFICE_API_KEY` | *(required)* | Lexoffice API Bearer token (or `op://` reference) |
+| `LEXOFFICE_API_KEY` | *(required)* | Lexoffice API Bearer token |
+| `MCP_API_KEY` | *(required for HTTP)* | Bearer token MCP clients must send |
 | `LEXOFFICE_TAX_TYPE` | *(auto-detect)* | Override tax regime: `vatfree`, `net`, or `gross` |
-| `MCP_TRANSPORT` | `streamable-http` | Transport: `streamable-http`, `sse`, or `stdio` |
+| `MCP_TRANSPORT` | `streamable-http` | Transport: `streamable-http` or `stdio` |
 | `MCP_HOST` | `0.0.0.0` | Bind address |
 | `MCP_PORT` | `8000` | Port number |
 
@@ -101,25 +100,12 @@ The server is designed for deployment via [Komodo](https://komo.do) with git-bas
 3. Set `LEXOFFICE_API_KEY` in the stack's environment
 4. Deploy — Komodo clones, builds the Docker image, and runs it
 
-## Claude.ai Connector Setup
+## Client access
 
-1. Deploy the server behind HTTPS (e.g., via Caddy reverse proxy)
-2. Open [claude.ai](https://claude.ai) > Settings > Connectors
-3. Click **Add custom connector**
-4. Name: `Lexoffice`
-5. URL: `https://your-domain.example.com/mcp`
-6. No OAuth needed (authless connector)
-7. Verify: open a new chat, click "+" > Connectors > enable Lexoffice
-
-### Caddy configuration example
-
-```
-mcp-lexoffice.example.com {
-    reverse_proxy your-server-ip:8000 {
-        flush_interval -1
-    }
-}
-```
+Production clients (Claude.ai, Claude Code, n8n) reach the server through the Cloudflare MCP
+portal, which holds `MCP_API_KEY` as its upstream bearer. For a direct connection, send
+`Authorization: Bearer $MCP_API_KEY` to `https://<host>/mcp`. New tools or parameters need a
+portal catalog refresh before portal clients see them.
 
 ## Tools Reference
 
@@ -272,21 +258,23 @@ mcp-lexoffice/
   mcp_lexoffice/
     __init__.py
     client.py          # Async HTTP client (httpx, rate limiting, 429 retry)
-    server.py           # FastMCP 3 server with 36 tools
+    config.py          # pydantic-settings env surface
+    server.py           # FastMCP 4 server with 36 tools
   tests/
     conftest.py         # Shared fixtures (respx mock, test client)
-    test_client.py      # Client unit tests (80 tests)
-    test_server.py      # Server/tool unit tests (217 tests)
+    test_client.py      # Client unit tests
+    test_server.py      # Server/tool unit tests
+    test_mcp_protocol.py # Protocol surface via the in-memory client
   .env.example          # Environment variable template
   docker-compose.yml    # Docker Compose for deployment
-  Dockerfile            # Python 3.13-slim with health check
+  Dockerfile            # Python 3.12-slim with health check
   pyproject.toml        # Dependencies and project metadata
   CLAUDE.md             # Claude Code project instructions
 ```
 
 ## Dependencies
 
-- **[FastMCP](https://github.com/jlowin/fastmcp)** >= 3.4.2, < 4.0.0 — MCP server framework
+- **[FastMCP](https://github.com/jlowin/fastmcp)** >= 4.0.10, < 5.0.0 — MCP server framework
 - **[httpx](https://www.python-httpx.org/)** >= 0.28.0 — Async HTTP client
 - **[pydantic](https://docs.pydantic.dev/)** >= 2.10 / **pydantic-settings** >= 2.12 — typed models & settings
 - **[python-dotenv](https://github.com/theskumar/python-dotenv)** >= 1.0.0 — `.env` file loading

@@ -1779,12 +1779,12 @@ async def test_create_article_tool():
     from mcp_lexoffice.server import create_article
 
     ctx = make_ctx({"create_article": {"id": "a-1"}})
-    result = await create_article(ctx, name="Sprechstunde", net_price=995.0, unit_name="Pauschal")
+    result = await create_article(ctx, name="Workshop", net_price=500.0, unit_name="Pauschal")
     parsed = as_dict(result)
     assert parsed["id"] == "a-1"
     call_data = ctx.lifespan_context["lexoffice"].create_article.call_args[0][0]
     assert call_data["price"]["taxRatePercentage"] == 0
-    assert call_data["price"]["netPrice"] == 995.0
+    assert call_data["price"]["netPrice"] == 500.0
     assert call_data["price"]["currency"] == "EUR"
     assert call_data["unitName"] == "Pauschal"
     assert call_data["type"] == "SERVICE"
@@ -2255,13 +2255,33 @@ async def test_workflow_prompts_registered():
     assert {"monthly_close", "dunning_run", "capture_receipt"} <= prompts
 
 
-async def test_service_catalog_resource_content():
+async def test_service_catalog_resource_content(monkeypatch):
     from mcp_lexoffice.server import service_catalog_resource
 
-    parsed = as_dict(service_catalog_resource())
-    names = {entry["name"] for entry in parsed}
-    assert "Digitale Sprechstunde" in names
-    assert "Consulting" in names
+    catalog = [{"name": "Example Service", "unit": "Stunde", "net_price": 100, "currency": "EUR"}]
+    monkeypatch.setenv("LEXOFFICE_SERVICE_CATALOG", json.dumps(catalog))
+    assert as_dict(service_catalog_resource()) == catalog
+
+
+async def test_service_catalog_resource_unset(monkeypatch):
+    from mcp_lexoffice.server import service_catalog_resource
+
+    monkeypatch.delenv("LEXOFFICE_SERVICE_CATALOG", raising=False)
+    assert "No service catalog configured" in as_dict(service_catalog_resource())["error"]
+
+
+async def test_service_catalog_resource_invalid_json(monkeypatch):
+    from mcp_lexoffice.server import service_catalog_resource
+
+    monkeypatch.setenv("LEXOFFICE_SERVICE_CATALOG", "{not json")
+    assert "not valid JSON" in as_dict(service_catalog_resource())["error"]
+
+
+def test_example_service_catalog_is_valid():
+    from pathlib import Path
+
+    example = json.loads((Path(__file__).parent.parent / "service-catalog.example.json").read_text())
+    assert example and all({"name", "unit", "net_price", "currency"} <= set(e) for e in example)
 
 
 async def test_countries_resource_uses_client():
@@ -2285,7 +2305,7 @@ def test_capture_receipt_prompt_weaves_args():
 # ── Typed output-schema coverage (deepen pass) ───────────────────────
 # These lock in the two invariants the deepen pass must never regress:
 #   1. Every typed model preserves the EXACT camelCase top-level wire keys it emits today.
-#   2. Every output model validates BOTH the success AND the error payload (the mcp-zernio bug).
+#   2. Every output model validates BOTH the success AND the error payload (a past output-schema bug).
 
 
 async def test_typed_output_schema_coverage():
@@ -2437,7 +2457,7 @@ async def test_get_contact_invoices_guardrails_raise():
 ])
 def test_models_validate_error_payload(model_name):
     """Every output model must validate the {'error': ...} short-circuit payload (the exact
-    mcp-zernio regression: a model that only validated the happy path)."""
+    regression: a model that only validated the happy path)."""
     import mcp_lexoffice.server as srv
 
     model = getattr(srv, model_name)

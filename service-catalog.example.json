@@ -1,0 +1,5 @@
+[
+  {"name": "Example Workshop", "unit": "Pauschal", "net_price": 500, "currency": "EUR"},
+  {"name": "Example Consulting", "unit": "Stunde", "net_price": 100, "currency": "EUR"},
+  {"name": "Example Development", "unit": "Tag", "net_price": 800, "currency": "EUR"}
+]

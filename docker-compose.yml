@@ -4,6 +4,7 @@ services:
     network_mode: host
     environment:
       - LEXOFFICE_API_KEY=${LEXOFFICE_API_KEY}
+      - LEXOFFICE_SERVICE_CATALOG=${LEXOFFICE_SERVICE_CATALOG:-}
       - MCP_TRANSPORT=streamable-http
       - MCP_PORT=${HOST_PORT:-8001}
       - MCP_API_KEY=${MCP_API_KEY:-}

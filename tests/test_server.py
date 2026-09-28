@@ -2014,7 +2014,6 @@ def test_main_defaults_to_streamable_http():
             port=8000,
             json_response=True,
             stateless_http=True,
-            allowed_hosts=["*"],
         )
 
 
@@ -2216,14 +2215,14 @@ async def test_read_tools_marked_read_only():
     tools = {t.name: t for t in await mcp.list_tools()}
     for name in ("get_profile", "get_invoice", "list_invoices", "search_contacts",
                  "get_financial_overview", "list_countries", "get_voucher"):
-        assert tools[name].annotations.readOnlyHint is True, name
+        assert tools[name].annotations.read_only_hint is True, name
 
 
 async def test_irreversible_tools_marked_destructive():
     """Finalize/send/delete carry destructiveHint so clients can warn before running them."""
     tools = {t.name: t for t in await mcp.list_tools()}
     for name in ("create_draft_invoice", "create_draft_quotation", "delete_draft_invoice"):
-        assert tools[name].annotations.destructiveHint is True, name
+        assert tools[name].annotations.destructive_hint is True, name
 
 
 async def test_tools_carry_tags():

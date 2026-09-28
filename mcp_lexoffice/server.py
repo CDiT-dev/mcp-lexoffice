@@ -107,7 +107,7 @@ mcp = FastMCP(
     icons=[
         Icon(
             src="https://www.lexware.de/favicon.ico",
-            mimeType="image/x-icon",
+            mime_type="image/x-icon",
         ),
     ],
     lifespan=lifespan,
@@ -616,9 +616,9 @@ def _build_address(
     tags={"finance", "profile", "read"},
     annotations=ToolAnnotations(
         title="Get organization profile",
-        readOnlyHint=True,
-        idempotentHint=True,
-        openWorldHint=True,
+        read_only_hint=True,
+        idempotent_hint=True,
+        open_world_hint=True,
     ),
 )
 async def get_profile(ctx: Context) -> Profile:
@@ -634,10 +634,10 @@ async def get_profile(ctx: Context) -> Profile:
     tags={"finance", "invoice", "write", "irreversible"},
     annotations=ToolAnnotations(
         title="Create invoice (draft, or finalized: irreversible)",
-        readOnlyHint=False,
-        destructiveHint=True,
-        idempotentHint=False,
-        openWorldHint=True,
+        read_only_hint=False,
+        destructive_hint=True,
+        idempotent_hint=False,
+        open_world_hint=True,
     ),
 )
 async def create_draft_invoice(
@@ -703,10 +703,10 @@ async def create_draft_invoice(
     tags={"finance", "invoice", "delete", "write", "irreversible"},
     annotations=ToolAnnotations(
         title="Delete draft invoice",
-        readOnlyHint=False,
-        destructiveHint=True,
-        idempotentHint=True,
-        openWorldHint=True,
+        read_only_hint=False,
+        destructive_hint=True,
+        idempotent_hint=True,
+        open_world_hint=True,
     ),
 )
 async def delete_draft_invoice(
@@ -730,9 +730,9 @@ async def delete_draft_invoice(
     tags={"finance", "invoice", "read"},
     annotations=ToolAnnotations(
         title="Get invoice",
-        readOnlyHint=True,
-        idempotentHint=True,
-        openWorldHint=True,
+        read_only_hint=True,
+        idempotent_hint=True,
+        open_world_hint=True,
     ),
 )
 async def get_invoice(
@@ -759,9 +759,9 @@ async def get_invoice(
     tags={"finance", "invoice", "read", "document"},
     annotations=ToolAnnotations(
         title="Render invoice PDF",
-        readOnlyHint=True,
-        idempotentHint=True,
-        openWorldHint=True,
+        read_only_hint=True,
+        idempotent_hint=True,
+        open_world_hint=True,
     ),
 )
 async def get_invoice_pdf(
@@ -777,9 +777,9 @@ async def get_invoice_pdf(
     tags={"finance", "invoice", "list", "read"},
     annotations=ToolAnnotations(
         title="List sales invoices",
-        readOnlyHint=True,
-        idempotentHint=True,
-        openWorldHint=True,
+        read_only_hint=True,
+        idempotent_hint=True,
+        open_world_hint=True,
     ),
 )
 async def list_invoices(
@@ -823,10 +823,10 @@ async def list_invoices(
     tags={"finance", "voucher", "upload", "write"},
     annotations=ToolAnnotations(
         title="Upload raw voucher file",
-        readOnlyHint=False,
-        destructiveHint=False,
-        idempotentHint=False,
-        openWorldHint=True,
+        read_only_hint=False,
+        destructive_hint=False,
+        idempotent_hint=False,
+        open_world_hint=True,
     ),
 )
 async def upload_voucher(
@@ -856,9 +856,9 @@ async def upload_voucher(
     tags={"finance", "expense", "list", "read"},
     annotations=ToolAnnotations(
         title="List expenses",
-        readOnlyHint=True,
-        idempotentHint=True,
-        openWorldHint=True,
+        read_only_hint=True,
+        idempotent_hint=True,
+        open_world_hint=True,
     ),
 )
 async def list_expenses(
@@ -945,9 +945,9 @@ async def _fetch_all_vouchers(
     tags={"finance", "report", "read"},
     annotations=ToolAnnotations(
         title="Financial overview (monthly)",
-        readOnlyHint=True,
-        idempotentHint=True,
-        openWorldHint=True,
+        read_only_hint=True,
+        idempotent_hint=True,
+        open_world_hint=True,
     ),
 )
 async def get_financial_overview(
@@ -960,20 +960,16 @@ async def get_financial_overview(
     invoices. Each query is fully paginated; only an account exceeding the internal page ceiling
     sets the result's `truncated` flag (older settled invoices may then be excluded)."""
     months = max(1, min(12, months))
-    await ctx.info(f"Aggregating financial overview for the last {months} month(s)")
 
     sales, sales_trunc = await _fetch_all_vouchers(
         ctx, "salesinvoice,invoice", voucher_status="paidoff"
     )
-    await ctx.report_progress(1, 3)
     purchases, purchases_trunc = await _fetch_all_vouchers(
         ctx, "purchaseinvoice", voucher_status="paidoff"
     )
-    await ctx.report_progress(2, 3)
     open_rows, open_trunc = await _fetch_all_vouchers(
         ctx, "salesinvoice,invoice", voucher_status="open"
     )
-    await ctx.report_progress(3, 3)
 
     truncated = sales_trunc or purchases_trunc or open_trunc
 
@@ -1020,9 +1016,9 @@ async def get_financial_overview(
     tags={"finance", "payment", "read"},
     annotations=ToolAnnotations(
         title="Get payment status",
-        readOnlyHint=True,
-        idempotentHint=True,
-        openWorldHint=True,
+        read_only_hint=True,
+        idempotent_hint=True,
+        open_world_hint=True,
     ),
 )
 async def get_payment_status(
@@ -1077,9 +1073,9 @@ async def get_payment_status(
     tags={"finance", "contact", "search", "read"},
     annotations=ToolAnnotations(
         title="Search contacts",
-        readOnlyHint=True,
-        idempotentHint=True,
-        openWorldHint=True,
+        read_only_hint=True,
+        idempotent_hint=True,
+        open_world_hint=True,
     ),
 )
 async def search_contacts(
@@ -1111,9 +1107,9 @@ async def search_contacts(
     tags={"finance", "contact", "read"},
     annotations=ToolAnnotations(
         title="Get contact",
-        readOnlyHint=True,
-        idempotentHint=True,
-        openWorldHint=True,
+        read_only_hint=True,
+        idempotent_hint=True,
+        open_world_hint=True,
     ),
 )
 async def get_contact(
@@ -1130,10 +1126,10 @@ async def get_contact(
     tags={"finance", "contact", "write"},
     annotations=ToolAnnotations(
         title="Create contact",
-        readOnlyHint=False,
-        destructiveHint=False,
-        idempotentHint=False,
-        openWorldHint=True,
+        read_only_hint=False,
+        destructive_hint=False,
+        idempotent_hint=False,
+        open_world_hint=True,
     ),
 )
 async def create_contact(
@@ -1187,10 +1183,10 @@ async def create_contact(
     tags={"finance", "contact", "write"},
     annotations=ToolAnnotations(
         title="Update contact",
-        readOnlyHint=False,
-        destructiveHint=False,
-        idempotentHint=True,
-        openWorldHint=True,
+        read_only_hint=False,
+        destructive_hint=False,
+        idempotent_hint=True,
+        open_world_hint=True,
     ),
 )
 async def update_contact(
@@ -1225,10 +1221,10 @@ async def update_contact(
     tags={"finance", "quotation", "write", "irreversible"},
     annotations=ToolAnnotations(
         title="Create quotation (draft, or finalized: irreversible)",
-        readOnlyHint=False,
-        destructiveHint=True,
-        idempotentHint=False,
-        openWorldHint=True,
+        read_only_hint=False,
+        destructive_hint=True,
+        idempotent_hint=False,
+        open_world_hint=True,
     ),
 )
 async def create_draft_quotation(
@@ -1288,10 +1284,10 @@ async def create_draft_quotation(
     tags={"finance", "quotation", "invoice", "write"},
     annotations=ToolAnnotations(
         title="Pursue quotation to draft invoice",
-        readOnlyHint=False,
-        destructiveHint=False,
-        idempotentHint=False,
-        openWorldHint=True,
+        read_only_hint=False,
+        destructive_hint=False,
+        idempotent_hint=False,
+        open_world_hint=True,
     ),
 )
 async def pursue_quotation_to_invoice(
@@ -1323,10 +1319,10 @@ async def pursue_quotation_to_invoice(
     tags={"finance", "dunning", "write", "irreversible"},
     annotations=ToolAnnotations(
         title="Create dunning (Mahnung)",
-        readOnlyHint=False,
-        destructiveHint=False,
-        idempotentHint=False,
-        openWorldHint=True,
+        read_only_hint=False,
+        destructive_hint=False,
+        idempotent_hint=False,
+        open_world_hint=True,
     ),
 )
 async def create_dunning(
@@ -1348,9 +1344,9 @@ async def create_dunning(
     tags={"finance", "dunning", "read", "document"},
     annotations=ToolAnnotations(
         title="Render dunning PDF",
-        readOnlyHint=True,
-        idempotentHint=True,
-        openWorldHint=True,
+        read_only_hint=True,
+        idempotent_hint=True,
+        open_world_hint=True,
     ),
 )
 async def render_dunning_pdf(
@@ -1369,9 +1365,9 @@ async def render_dunning_pdf(
     tags={"finance", "article", "list", "read"},
     annotations=ToolAnnotations(
         title="List articles",
-        readOnlyHint=True,
-        idempotentHint=True,
-        openWorldHint=True,
+        read_only_hint=True,
+        idempotent_hint=True,
+        open_world_hint=True,
     ),
 )
 async def list_articles(
@@ -1388,10 +1384,10 @@ async def list_articles(
     tags={"finance", "article", "write"},
     annotations=ToolAnnotations(
         title="Create article",
-        readOnlyHint=False,
-        destructiveHint=False,
-        idempotentHint=False,
-        openWorldHint=True,
+        read_only_hint=False,
+        destructive_hint=False,
+        idempotent_hint=False,
+        open_world_hint=True,
     ),
 )
 async def create_article(
@@ -1426,9 +1422,9 @@ async def create_article(
     tags={"finance", "article", "read"},
     annotations=ToolAnnotations(
         title="Get article",
-        readOnlyHint=True,
-        idempotentHint=True,
-        openWorldHint=True,
+        read_only_hint=True,
+        idempotent_hint=True,
+        open_world_hint=True,
     ),
 )
 async def get_article(
@@ -1444,10 +1440,10 @@ async def get_article(
     tags={"finance", "article", "write"},
     annotations=ToolAnnotations(
         title="Update article",
-        readOnlyHint=False,
-        destructiveHint=False,
-        idempotentHint=True,
-        openWorldHint=True,
+        read_only_hint=False,
+        destructive_hint=False,
+        idempotent_hint=True,
+        open_world_hint=True,
     ),
 )
 async def update_article(
@@ -1479,9 +1475,9 @@ async def update_article(
     tags={"finance", "voucher", "list", "read"},
     annotations=ToolAnnotations(
         title="List vouchers (generic)",
-        readOnlyHint=True,
-        idempotentHint=True,
-        openWorldHint=True,
+        read_only_hint=True,
+        idempotent_hint=True,
+        open_world_hint=True,
     ),
 )
 async def list_vouchers(
@@ -1514,9 +1510,9 @@ async def list_vouchers(
     tags={"finance", "voucher", "read"},
     annotations=ToolAnnotations(
         title="Get voucher",
-        readOnlyHint=True,
-        idempotentHint=True,
-        openWorldHint=True,
+        read_only_hint=True,
+        idempotent_hint=True,
+        open_world_hint=True,
     ),
 )
 async def get_voucher(
@@ -1536,10 +1532,10 @@ async def get_voucher(
     tags={"finance", "voucher", "write"},
     annotations=ToolAnnotations(
         title="Update voucher line items",
-        readOnlyHint=False,
-        destructiveHint=False,
-        idempotentHint=True,
-        openWorldHint=True,
+        read_only_hint=False,
+        destructive_hint=False,
+        idempotent_hint=True,
+        open_world_hint=True,
     ),
 )
 async def update_voucher(
@@ -1566,9 +1562,9 @@ async def update_voucher(
     tags={"finance", "voucher", "reference", "read"},
     annotations=ToolAnnotations(
         title="List posting categories",
-        readOnlyHint=True,
-        idempotentHint=True,
-        openWorldHint=True,
+        read_only_hint=True,
+        idempotent_hint=True,
+        open_world_hint=True,
     ),
 )
 async def list_posting_categories(
@@ -1593,10 +1589,10 @@ async def list_posting_categories(
     tags={"finance", "voucher", "write", "belegfaenger"},
     annotations=ToolAnnotations(
         title="Create structured purchase voucher",
-        readOnlyHint=False,
-        destructiveHint=False,
-        idempotentHint=False,
-        openWorldHint=True,
+        read_only_hint=False,
+        destructive_hint=False,
+        idempotent_hint=False,
+        open_world_hint=True,
     ),
 )
 async def create_voucher(
@@ -1689,7 +1685,6 @@ async def create_voucher(
         data["contactName"] = contact_name
 
     tax_rate_adjusted = False
-    await ctx.info(f"Creating purchase voucher (gross {total_gross} {tax_type}, {rate}% VAT)")
     try:
         created = await _client(ctx).create_voucher(data)
     except httpx.HTTPStatusError as exc:
@@ -1698,8 +1693,8 @@ async def create_voucher(
         # voucher still lands with the gross amount + vendor for bank-matching. The user
         # corrects the VAT in 'Zu prüfen'.
         if rate and _is_taxrate_rejection(exc):
-            await ctx.warning(
-                f"Posting category rejected {rate}% VAT — re-booking at 0% so the voucher persists"
+            logger.warning(
+                "Posting category rejected %s%% VAT; re-booking at 0%% so the voucher persists", rate
             )
             rate = 0
             item = data["voucherItems"][0]
@@ -1725,11 +1720,9 @@ async def create_voucher(
             if len(file_bytes) > 5 * 1024 * 1024:
                 attachment_error = "File exceeds 5MB Lexoffice upload limit"
             else:
-                await ctx.info(f"Attaching receipt file {file_name} to voucher {voucher_id}")
                 await _client(ctx).attach_voucher_file(voucher_id, file_bytes, file_name)
 
     # Read back to confirm enrichment persisted (the failure mode CDI-1164 was opened for).
-    await ctx.info("Reading voucher back to confirm enrichment persisted")
     persisted = await _client(ctx).get_voucher(voucher_id) if voucher_id else created
     result: dict[str, Any] = {
         "id": voucher_id,
@@ -1766,10 +1759,10 @@ async def create_voucher(
     tags={"finance", "voucher", "write", "file"},
     annotations=ToolAnnotations(
         title="Attach file to voucher",
-        readOnlyHint=False,
-        destructiveHint=False,
-        idempotentHint=False,
-        openWorldHint=True,
+        read_only_hint=False,
+        destructive_hint=False,
+        idempotent_hint=False,
+        open_world_hint=True,
     ),
 )
 async def attach_voucher_file(
@@ -1802,9 +1795,9 @@ async def attach_voucher_file(
     tags={"finance", "reference", "read"},
     annotations=ToolAnnotations(
         title="List payment conditions",
-        readOnlyHint=True,
-        idempotentHint=True,
-        openWorldHint=True,
+        read_only_hint=True,
+        idempotent_hint=True,
+        open_world_hint=True,
     ),
 )
 async def list_payment_conditions(ctx: Context) -> list[PaymentCondition]:
@@ -1820,9 +1813,9 @@ async def list_payment_conditions(ctx: Context) -> list[PaymentCondition]:
     tags={"finance", "reference", "read"},
     annotations=ToolAnnotations(
         title="List countries",
-        readOnlyHint=True,
-        idempotentHint=True,
-        openWorldHint=True,
+        read_only_hint=True,
+        idempotent_hint=True,
+        open_world_hint=True,
     ),
 )
 async def list_countries(ctx: Context) -> list[Country]:
@@ -1838,9 +1831,9 @@ async def list_countries(ctx: Context) -> list[Country]:
     tags={"finance", "recurring", "list", "read"},
     annotations=ToolAnnotations(
         title="List recurring templates",
-        readOnlyHint=True,
-        idempotentHint=True,
-        openWorldHint=True,
+        read_only_hint=True,
+        idempotent_hint=True,
+        open_world_hint=True,
     ),
 )
 async def list_recurring_templates(ctx: Context) -> list[RecurringTemplateSummary]:
@@ -1860,9 +1853,9 @@ async def list_recurring_templates(ctx: Context) -> list[RecurringTemplateSummar
     tags={"finance", "recurring", "read"},
     annotations=ToolAnnotations(
         title="Get recurring template",
-        readOnlyHint=True,
-        idempotentHint=True,
-        openWorldHint=True,
+        read_only_hint=True,
+        idempotent_hint=True,
+        open_world_hint=True,
     ),
 )
 async def get_recurring_template(
@@ -1882,10 +1875,10 @@ async def get_recurring_template(
     tags={"finance", "contact", "composite", "write"},
     annotations=ToolAnnotations(
         title="Find or create contact",
-        readOnlyHint=False,
-        destructiveHint=False,
-        idempotentHint=True,
-        openWorldHint=True,
+        read_only_hint=False,
+        destructive_hint=False,
+        idempotent_hint=True,
+        open_world_hint=True,
     ),
 )
 async def find_or_create_contact(
@@ -1942,9 +1935,9 @@ async def find_or_create_contact(
     tags={"finance", "quotation", "list", "read"},
     annotations=ToolAnnotations(
         title="List quotations",
-        readOnlyHint=True,
-        idempotentHint=True,
-        openWorldHint=True,
+        read_only_hint=True,
+        idempotent_hint=True,
+        open_world_hint=True,
     ),
 )
 async def list_quotations(
@@ -1966,9 +1959,9 @@ async def list_quotations(
     tags={"finance", "invoice", "contact", "composite", "read"},
     annotations=ToolAnnotations(
         title="Get invoices for a contact",
-        readOnlyHint=True,
-        idempotentHint=True,
-        openWorldHint=True,
+        read_only_hint=True,
+        idempotent_hint=True,
+        open_world_hint=True,
     ),
 )
 async def get_contact_invoices(
@@ -2027,10 +2020,10 @@ async def get_contact_invoices(
     tags={"finance", "creditnote", "write"},
     annotations=ToolAnnotations(
         title="Create credit note",
-        readOnlyHint=False,
-        destructiveHint=False,
-        idempotentHint=False,
-        openWorldHint=True,
+        read_only_hint=False,
+        destructive_hint=False,
+        idempotent_hint=False,
+        open_world_hint=True,
     ),
 )
 async def create_credit_note(
@@ -2105,7 +2098,6 @@ SERVICE_CATALOG = [
     name="Service catalog",
     description="Standard service offerings and pricing used when drafting invoices/quotations.",
     mime_type="application/json",
-    annotations={"readOnlyHint": True, "idempotentHint": True},
 )
 def service_catalog_resource() -> str:
     """Standard service offerings and their list pricing (net, EUR)."""
@@ -2117,7 +2109,6 @@ def service_catalog_resource() -> str:
     name="Countries",
     description="Countries with tax classification (DE, intraCommunity, thirdPartyCountry).",
     mime_type="application/json",
-    annotations={"readOnlyHint": True, "idempotentHint": True},
 )
 async def countries_resource(ctx: Context) -> str:
     """Live country list with tax classification, from the Lexoffice API."""
@@ -2129,7 +2120,6 @@ async def countries_resource(ctx: Context) -> str:
     name="Posting categories",
     description="Buchungskonten (UUID, type income/outgo, contactRequired, splitAllowed).",
     mime_type="application/json",
-    annotations={"readOnlyHint": True, "idempotentHint": True},
 )
 async def posting_categories_resource(ctx: Context) -> str:
     """Live posting categories (Buchungskonten) for booking vouchers, from the API."""
@@ -2141,7 +2131,6 @@ async def posting_categories_resource(ctx: Context) -> str:
     name="Payment conditions",
     description="Configured Zahlungsbedingungen (payment terms) for the account.",
     mime_type="application/json",
-    annotations={"readOnlyHint": True, "idempotentHint": True},
 )
 async def payment_conditions_resource(ctx: Context) -> str:
     """Live payment conditions (Zahlungsbedingungen), from the API."""
@@ -2153,7 +2142,6 @@ async def payment_conditions_resource(ctx: Context) -> str:
     name="Tax configuration",
     description="Auto-detected tax regime (vatfree/net/gross) and default VAT rate for this account.",
     mime_type="application/json",
-    annotations={"readOnlyHint": True, "idempotentHint": True},
 )
 async def tax_config_resource(ctx: Context) -> str:
     """The account's resolved tax regime and default VAT rate (auto-detected from the profile)."""
@@ -2165,7 +2153,6 @@ async def tax_config_resource(ctx: Context) -> str:
     name="Server status",
     description="mcp-lexoffice service name, version, and uptime.",
     mime_type="application/json",
-    annotations={"readOnlyHint": True},
 )
 def status_resource() -> str:
     """Lightweight server status (name, version, uptime) — mirrors the /health route."""
@@ -2181,7 +2168,6 @@ def status_resource() -> str:
     name="Contact invoices",
     description="All invoices for a contact (by UUID), mirroring the get_contact_invoices tool.",
     mime_type="application/json",
-    annotations={"readOnlyHint": True, "idempotentHint": True},
 )
 async def contact_invoices_resource(contact_id: str, ctx: Context) -> str:
     """Read-only view of a contact's invoices, reusing the get_contact_invoices tool.
@@ -2303,14 +2289,12 @@ def main():
         transport = "streamable-http"
 
     if transport == "streamable-http":
-        # fastmcp >=3.4.3 rejects non-localhost Host with 421 unless allowed_hosts set (edge CF-Access/Tailscale gated).
         mcp.run(
             transport=transport,
             host=host,
             port=port,
             json_response=True,
             stateless_http=True,
-            allowed_hosts=["*"],
         )
     else:
         mcp.run(transport=transport, host=host, port=port, json_response=True)

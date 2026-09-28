@@ -4,6 +4,10 @@ WORKDIR /app
 
 ENV PYTHONUNBUFFERED=1
 
+# ca-certificates for httpx2 (OS trust store)
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY pyproject.toml uv.lock README.md ./
 COPY mcp_lexoffice/ mcp_lexoffice/
 

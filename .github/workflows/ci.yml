@@ -8,11 +8,12 @@ on:
 permissions:
   contents: read
 
-# NOTE: this runs on every PR/push but does NOT yet gate the release/deploy on
-# main — that needs branch protection making `test` a required check.
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      # fastmcp 4: fail on any camelCase MCP field access instead of warning.
+      FASTMCP_MCP_CAMELCASE_COMPAT: "false"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
       - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1

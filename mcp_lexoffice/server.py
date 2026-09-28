@@ -76,10 +76,12 @@ SERVER_INSTRUCTIONS = (
     "Tax regime is auto-detected from the Lexoffice profile (vatfree = Kleinunternehmer 0%, "
     "net = 19%, gross = 19%). Default payment terms: Zahlbar sofort, rein netto.\n\n"
     "Choosing a tool:\n"
-    "- One-shot billing ('send an invoice to X for Y'): create_and_send_invoice. For drafts "
-    "that need review first: create_draft_invoice, then finalize_invoice + send_invoice.\n"
-    "- Quotations (Angebote): create_draft_quotation -> finalize_quotation -> "
-    "pursue_quotation_to_invoice, or convert_quotation_and_send in one step.\n"
+    "- Invoices: create_draft_invoice. Finalizing is only possible at create time: pass "
+    "finalize=true (irreversible; assigns the number). There is no separate finalize step "
+    "for an existing draft. Sending by email happens in the Lexoffice UI for now; this server "
+    "has no send tool.\n"
+    "- Quotations (Angebote): create_draft_quotation (finalize=true to finalize on create) -> "
+    "pursue_quotation_to_invoice, which creates a new DRAFT invoice.\n"
     "- Listing: list_invoices (sales), list_expenses (purchases), list_quotations; "
     "list_vouchers only for other types (creditnote, orderconfirmation, ...).\n"
     "- Receipt capture (Belegfänger): find_or_create_contact -> create_voucher (structured, "
@@ -90,9 +92,9 @@ SERVER_INSTRUCTIONS = (
     "use this server; for CRM/chat contacts use watermelon.\n"
     "- Money owed: get_payment_status, get_contact_invoices, create_dunning (Mahnung) for "
     "overdue invoices.\n\n"
-    "Irreversible actions (finalize_invoice, finalize_quotation, send_invoice, "
-    "create_and_send_invoice, convert_quotation_and_send) assign numbers / email customers and "
-    "cannot be undone — confirm intent before calling. Reference data is also exposed as "
+    "Irreversible actions (create_draft_invoice / create_draft_quotation with finalize=true, "
+    "create_credit_note with finalize=true, create_dunning, delete_draft_invoice) assign "
+    "numbers or delete data and cannot be undone — confirm intent before calling. Reference data is also exposed as "
     "resources under the lexoffice:// scheme (countries, posting-categories, payment-conditions, "
     "service-catalog, status).\n\n"
     "Service catalog: Digitale Sprechstunde (EUR 995 Pauschal), Consulting (EUR 150/Stunde), "
@@ -349,7 +351,7 @@ class ContactList(LexofficeBase):
 
 
 class Quotation(LexofficeBase):
-    """A quotation (Angebot) object (create_draft_quotation / finalize_quotation)."""
+    """A quotation (Angebot) object (create_draft_quotation / pursue_quotation_to_invoice)."""
 
     id: str | None = None
     organizationId: str | None = None
@@ -484,30 +486,11 @@ class FileRef(LexofficeBase):
     voucherId: str | None = None
 
 
-class SendResult(LexofficeBase):
-    """Status envelope for send_invoice ({status, invoice_id, recipient} or error)."""
-
-    status: str | None = None
-    invoice_id: str | None = None
-    recipient: str | None = None
-
-
 class DeleteResult(LexofficeBase):
     """Status envelope for delete_draft_invoice ({status, invoice_id} or error)."""
 
     status: str | None = None
     invoice_id: str | None = None
-
-
-class SentInvoiceResult(LexofficeBase):
-    """One-shot send summary (create_and_send_invoice / convert_quotation_and_send)."""
-
-    status: str | None = None
-    invoice_id: str | None = None
-    voucherNumber: str | None = None
-    recipient: str | None = None
-    totalAmount: float | None = None
-    quotation_id: str | None = None
 
 
 DEFAULT_TAX_RATE = {"vatfree": 0, "net": 19, "gross": 19}
@@ -648,11 +631,11 @@ async def get_profile(ctx: Context) -> Profile:
 
 
 @mcp.tool(
-    tags={"finance", "invoice", "write"},
+    tags={"finance", "invoice", "write", "irreversible"},
     annotations=ToolAnnotations(
-        title="Create draft invoice",
+        title="Create invoice (draft, or finalized: irreversible)",
         readOnlyHint=False,
-        destructiveHint=False,
+        destructiveHint=True,
         idempotentHint=False,
         openWorldHint=True,
     ),
@@ -675,10 +658,16 @@ async def create_draft_invoice(
     introduction: Annotated[str | None, "Introduction text above line items"] = None,
     remark: Annotated[str | None, "Closing remark below line items"] = None,
     tax_rate: Annotated[int | None, "Override tax rate percentage for all line items"] = None,
+    finalize: Annotated[
+        bool,
+        "Finalize on create (assigns the number, locks the document). NOT reversible. "
+        "Only set when the user explicitly asked to finalize.",
+    ] = False,
 ) -> Invoice:
-    """[finance] Create a draft invoice in Lexware Office. Returns the invoice ID and a deep link to review it.
+    """[finance] Create an invoice in Lexware Office. Returns the invoice ID and a deep link.
 
-    Use create_and_send_invoice instead if you want to create, finalize, and send in one step.
+    Default is a draft. finalize=true finalizes on create (Lexoffice only supports finalizing
+    at creation time); that is irreversible. Sending is done in the Lexoffice UI.
     Line items example: [{"name": "IT Consulting", "unit_price": 3000, "quantity": 1}]
     Tax regime is auto-detected from the Lexoffice profile. Override per-item via tax_rate field.
     """
@@ -704,31 +693,9 @@ async def create_draft_invoice(
             "paymentTermDuration": payment_term_duration,
         }
 
-    result = await _client(ctx).create_invoice(data)
+    result = await _client(ctx).create_invoice(data, finalize=finalize)
     invoice_id = result.get("id", "")
-    result["deepLink"] = _deep_link(invoice_id, edit=True)
-    return Invoice.model_validate(result)
-
-
-@mcp.tool(
-    tags={"finance", "invoice", "write", "irreversible"},
-    annotations=ToolAnnotations(
-        title="Finalize invoice (irreversible)",
-        readOnlyHint=False,
-        destructiveHint=True,
-        idempotentHint=False,
-        openWorldHint=True,
-    ),
-)
-async def finalize_invoice(
-    ctx: Context,
-    invoice_id: Annotated[str, "UUID of the draft invoice to finalize"],
-) -> Invoice:
-    """[finance] Finalize a draft invoice — assigns an invoice number and makes it non-editable.
-    Review the draft in Lexoffice UI before calling this. Cannot be undone."""
-    await _client(ctx).finalize_invoice(invoice_id)
-    result = await _client(ctx).get_invoice(invoice_id)
-    result["deepLink"] = _deep_link(invoice_id)
+    result["deepLink"] = _deep_link(invoice_id, edit=not finalize)
     return Invoice.model_validate(result)
 
 
@@ -757,34 +724,6 @@ async def delete_draft_invoice(
 
     await _client(ctx).delete_invoice(invoice_id)
     return DeleteResult.model_validate({"status": "deleted", "invoice_id": invoice_id})
-
-
-@mcp.tool(
-    tags={"finance", "invoice", "send", "write", "irreversible"},
-    annotations=ToolAnnotations(
-        title="Send invoice by email",
-        readOnlyHint=False,
-        destructiveHint=True,
-        idempotentHint=False,
-        openWorldHint=True,
-    ),
-)
-async def send_invoice(
-    ctx: Context,
-    invoice_id: Annotated[str, "UUID of the finalized invoice"],
-    recipient_email: Annotated[str, "Email address to send the invoice to"],
-) -> SendResult:
-    """[finance] Send a finalized invoice by email. The invoice must be finalized first."""
-    invoice = await _client(ctx).get_invoice(invoice_id)
-    status = invoice.get("voucherStatus", "")
-    if status == "draft":
-        raise ToolError(
-            "Invoice is still a draft. Finalize it first. "
-            f"Edit it at {_deep_link(invoice_id, edit=True)}"
-        )
-
-    await _client(ctx).send_invoice(invoice_id, recipient_email)
-    return SendResult.model_validate({"status": "sent", "invoice_id": invoice_id, "recipient": recipient_email})
 
 
 @mcp.tool(
@@ -1283,11 +1222,11 @@ async def update_contact(
 
 
 @mcp.tool(
-    tags={"finance", "quotation", "write"},
+    tags={"finance", "quotation", "write", "irreversible"},
     annotations=ToolAnnotations(
-        title="Create draft quotation",
+        title="Create quotation (draft, or finalized: irreversible)",
         readOnlyHint=False,
-        destructiveHint=False,
+        destructiveHint=True,
         idempotentHint=False,
         openWorldHint=True,
     ),
@@ -1310,8 +1249,16 @@ async def create_draft_quotation(
     introduction: Annotated[str | None, "Introduction text"] = None,
     remark: Annotated[str | None, "Closing remark"] = None,
     tax_rate: Annotated[int | None, "Override tax rate percentage for all line items"] = None,
+    finalize: Annotated[
+        bool,
+        "Finalize on create (assigns the number, locks the document). NOT reversible. "
+        "Only set when the user explicitly asked to finalize.",
+    ] = False,
 ) -> Quotation:
-    """[finance] Create a draft quotation (Angebot) in Lexware Office. Returns ID and deep link."""
+    """[finance] Create a quotation (Angebot) in Lexware Office. Returns ID and deep link.
+
+    Default is a draft. finalize=true finalizes on create (the only way Lexoffice supports);
+    that is irreversible. A finalized quotation can go to pursue_quotation_to_invoice."""
     tax_config = await _get_tax_config(ctx)
     effective_rate = tax_rate if tax_rate is not None else tax_config["default_rate"]
     address = {"contactId": contact_id} if contact_id else _build_address(recipient_name, street, zip_code, city, country_code)
@@ -1331,30 +1278,9 @@ async def create_draft_quotation(
     if expiration_date:
         data["expirationDate"] = expiration_date
 
-    result = await _client(ctx).create_quotation(data)
+    result = await _client(ctx).create_quotation(data, finalize=finalize)
     qid = result.get("id", "")
-    result["deepLink"] = _deep_link(qid, edit=True)
-    return Quotation.model_validate(result)
-
-
-@mcp.tool(
-    tags={"finance", "quotation", "write", "irreversible"},
-    annotations=ToolAnnotations(
-        title="Finalize quotation (irreversible)",
-        readOnlyHint=False,
-        destructiveHint=True,
-        idempotentHint=False,
-        openWorldHint=True,
-    ),
-)
-async def finalize_quotation(
-    ctx: Context,
-    quotation_id: Annotated[str, "UUID of the draft quotation"],
-) -> Quotation:
-    """[finance] Finalize a quotation — assigns Angebotsnummer, makes it sendable."""
-    await _client(ctx).finalize_quotation(quotation_id)
-    result = await _client(ctx).get_quotation(quotation_id)
-    result["deepLink"] = _deep_link(quotation_id)
+    result["deepLink"] = _deep_link(qid, edit=not finalize)
     return Quotation.model_validate(result)
 
 
@@ -1372,8 +1298,10 @@ async def pursue_quotation_to_invoice(
     ctx: Context,
     quotation_id: Annotated[str, "UUID of the finalized quotation"],
 ) -> Invoice:
-    """[finance] Convert a finalized quotation into a draft invoice (Angebot to Rechnung).
-    The quotation must be finalized first."""
+    """[finance] Convert a finalized quotation into a NEW draft invoice (Angebot to Rechnung).
+
+    The quotation must be finalized first (create_draft_quotation with finalize=true).
+    The resulting invoice is a draft: review, finalize and send it in the Lexoffice UI."""
     quotation = await _client(ctx).get_quotation(quotation_id)
     status = quotation.get("voucherStatus", "")
     if status == "draft":
@@ -1951,85 +1879,6 @@ async def get_recurring_template(
 
 
 @mcp.tool(
-    tags={"finance", "invoice", "composite", "send", "write", "irreversible"},
-    annotations=ToolAnnotations(
-        title="Create, finalize & send invoice (irreversible)",
-        readOnlyHint=False,
-        destructiveHint=True,
-        idempotentHint=False,
-        openWorldHint=True,
-    ),
-)
-async def create_and_send_invoice(
-    ctx: Context,
-    recipient_name: Annotated[str, "Company or person name for the invoice recipient"],
-    recipient_email: Annotated[str, "Email address to send the invoice to"],
-    line_items: Annotated[
-        list[dict[str, Any]],
-        "Line items. Each: {name, unit_price, quantity?, unit_name?, description?, tax_rate?}",
-    ],
-    contact_id: Annotated[str | None, "UUID of an existing Lexoffice contact (links invoice to contact record)"] = None,
-    street: Annotated[str | None, "Recipient street address"] = None,
-    zip_code: Annotated[str | None, "Recipient postal code"] = None,
-    city: Annotated[str | None, "Recipient city"] = None,
-    country_code: Annotated[str, "ISO country code"] = "DE",
-    currency: Annotated[str, "Currency code"] = "EUR",
-    payment_term_duration: Annotated[int | None, "Payment term in days (e.g. 14)"] = None,
-    title: Annotated[str, "Invoice title"] = "Rechnung",
-    introduction: Annotated[str | None, "Introduction text above line items"] = None,
-    remark: Annotated[str | None, "Closing remark below line items"] = None,
-    tax_rate: Annotated[int | None, "Override tax rate percentage for all line items"] = None,
-) -> SentInvoiceResult:
-    """[finance] Create, finalize, and send an invoice in one step.
-
-    Use when the user says 'send an invoice to X for Y'. Creates a draft, finalizes it
-    (assigns invoice number), and emails it to the recipient. For drafts that need
-    review first, use create_draft_invoice instead."""
-    tax_config = await _get_tax_config(ctx)
-    effective_rate = tax_rate if tax_rate is not None else tax_config["default_rate"]
-    address = {"contactId": contact_id} if contact_id else _build_address(recipient_name, street, zip_code, city, country_code)
-    data: dict[str, Any] = {
-        "voucherDate": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000+00:00"),
-        "address": address,
-        "lineItems": _build_line_items(line_items, default_tax_rate=effective_rate),
-        "totalPrice": {"currency": currency},
-        "taxConditions": {"taxType": tax_config["tax_type"]},
-        "shippingConditions": {"shippingType": "none"},
-        "title": title,
-    }
-    if introduction:
-        data["introduction"] = introduction
-    if remark:
-        data["remark"] = remark
-    if payment_term_duration:
-        data["paymentConditions"] = {
-            "paymentTermLabel": f"{payment_term_duration} Tage",
-            "paymentTermDuration": payment_term_duration,
-        }
-
-    await ctx.info(f"Creating draft invoice for {recipient_name}")
-    created = await _client(ctx).create_invoice(data)
-    invoice_id = created.get("id", "")
-    await ctx.report_progress(1, 3)
-    await ctx.info("Finalizing invoice (assigns number)")
-    await _client(ctx).finalize_invoice(invoice_id)
-    await ctx.report_progress(2, 3)
-    await ctx.info(f"Sending invoice to {recipient_email}")
-    await _client(ctx).send_invoice(invoice_id, recipient_email)
-    await ctx.report_progress(3, 3)
-    invoice = await _client(ctx).get_invoice(invoice_id)
-    invoice["deepLink"] = _deep_link(invoice_id)
-    return SentInvoiceResult.model_validate({
-        "status": "sent",
-        "invoice_id": invoice_id,
-        "voucherNumber": invoice.get("voucherNumber"),
-        "recipient": recipient_email,
-        "totalAmount": invoice.get("totalPrice", {}).get("totalNetAmount"),
-        "deepLink": invoice["deepLink"],
-    })
-
-
-@mcp.tool(
     tags={"finance", "contact", "composite", "write"},
     annotations=ToolAnnotations(
         title="Find or create contact",
@@ -2087,55 +1936,6 @@ async def find_or_create_contact(
     result["deepLink"] = _contact_link(contact_id)
     result["_action"] = "created_new"
     return Contact.model_validate(result)
-
-
-@mcp.tool(
-    tags={"finance", "quotation", "invoice", "composite", "send", "write", "irreversible"},
-    annotations=ToolAnnotations(
-        title="Convert quotation & send invoice (irreversible)",
-        readOnlyHint=False,
-        destructiveHint=True,
-        idempotentHint=False,
-        openWorldHint=True,
-    ),
-)
-async def convert_quotation_and_send(
-    ctx: Context,
-    quotation_id: Annotated[str, "UUID of the finalized quotation"],
-    recipient_email: Annotated[str, "Email address to send the invoice to"],
-) -> SentInvoiceResult:
-    """[finance] Convert an accepted quotation into an invoice and send it in one step.
-
-    The quotation must be finalized first. Creates a draft invoice from the quotation,
-    finalizes it, and sends it by email."""
-    quotation = await _client(ctx).get_quotation(quotation_id)
-    status = quotation.get("voucherStatus", "")
-    if status == "draft":
-        raise ToolError(
-            "Quotation is still a draft. Finalize it first. "
-            f"Edit it at {_deep_link(quotation_id, edit=True)}"
-        )
-
-    await ctx.info("Converting quotation to draft invoice")
-    pursued = await _client(ctx).pursue_quotation(quotation_id)
-    invoice_id = pursued.get("id", "")
-    await ctx.report_progress(1, 3)
-    await ctx.info("Finalizing invoice (assigns number)")
-    await _client(ctx).finalize_invoice(invoice_id)
-    await ctx.report_progress(2, 3)
-    await ctx.info(f"Sending invoice to {recipient_email}")
-    await _client(ctx).send_invoice(invoice_id, recipient_email)
-    await ctx.report_progress(3, 3)
-    invoice = await _client(ctx).get_invoice(invoice_id)
-    invoice["deepLink"] = _deep_link(invoice_id)
-    return SentInvoiceResult.model_validate({
-        "status": "sent",
-        "invoice_id": invoice_id,
-        "voucherNumber": invoice.get("voucherNumber"),
-        "recipient": recipient_email,
-        "quotation_id": quotation_id,
-        "deepLink": invoice["deepLink"],
-    })
 
 
 @mcp.tool(

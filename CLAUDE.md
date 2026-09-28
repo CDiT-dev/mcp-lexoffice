@@ -29,11 +29,11 @@ LEXOFFICE_API_KEY='op://Vault/item-id/API key' python -m mcp_lexoffice.server
 - Per-item `tax_rate` override available on invoices, quotations, and articles
 - Default payment terms: "Zahlbar sofort, rein netto"
 
-## Tools (41 total)
-- **Invoices**: create_draft_invoice, create_and_send_invoice, finalize_invoice, send_invoice, get_invoice, get_invoice_pdf, list_invoices, delete_draft_invoice
+## Tools (36 total)
+- **Invoices**: create_draft_invoice (finalize=true to finalize on create), get_invoice, get_invoice_pdf, list_invoices, delete_draft_invoice
 - **Financial**: list_expenses, get_financial_overview, get_payment_status
 - **Contacts**: search_contacts, get_contact, create_contact, update_contact, find_or_create_contact, get_contact_invoices
-- **Quotations**: create_draft_quotation, finalize_quotation, pursue_quotation_to_invoice, convert_quotation_and_send, list_quotations
+- **Quotations**: create_draft_quotation (finalize=true), pursue_quotation_to_invoice, list_quotations
 - **Recurring**: list_recurring_templates, get_recurring_template
 - **Credit Notes**: create_credit_note
 - **Dunnings**: create_dunning, render_dunning_pdf
@@ -41,12 +41,12 @@ LEXOFFICE_API_KEY='op://Vault/item-id/API key' python -m mcp_lexoffice.server
 - **Vouchers**: upload_voucher (raw file → Beleg-Eingang), create_voucher (structured purchaseinvoice w/ amount+vendor, optional PDF attach + read-back), attach_voucher_file, get_voucher, update_voucher, list_vouchers, list_posting_categories
 - **Other**: get_profile, list_payment_conditions, list_countries
 
-All 41 tools carry MCP annotations (`readOnlyHint` on reads, `destructiveHint` on
-finalize/send/delete, `idempotentHint`, `openWorldHint`, human `title`) and first-class
+All 36 tools carry MCP annotations (`readOnlyHint` on reads, `destructiveHint` on
+finalize-capable creates/delete, `idempotentHint`, `openWorldHint`, human `title`) and first-class
 `tags` (e.g. `finance`, `invoice`, `irreversible`, `belegfaenger`).
 
 ### Typed output schemas
-36 of the 41 tools return typed Pydantic models, so fastmcp advertises a per-tool
+31 of the 36 tools return typed Pydantic models, so fastmcp advertises a per-tool
 `output_schema` and emits machine-validated structured content alongside the human-readable
 JSON. Reusable domain models live in `server.py`: `Profile`, `Invoice`, `VoucherList`
 (+`VoucherListEntry`), `Contact`/`ContactList`, `Quotation`, `Article`/`ArticleList`,

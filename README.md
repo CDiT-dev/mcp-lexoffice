@@ -1,6 +1,6 @@
 # mcp-lexoffice
 
-MCP server for **Lexware Office** (formerly Lexoffice) — a Python-based accounting integration that exposes 41 tools for invoices, contacts, quotations, dunnings, articles, recurring templates, credit notes, financial queries, and voucher management.
+MCP server for **Lexware Office** (formerly Lexoffice) — a Python-based accounting integration that exposes 36 tools for invoices, contacts, quotations, dunnings, articles, recurring templates, credit notes, financial queries, and voucher management.
 
 Built with [FastMCP 3](https://github.com/jlowin/fastmcp) and designed to work as a **Claude.ai custom connector**.
 
@@ -127,16 +127,13 @@ mcp-lexoffice.example.com {
 
 | Tool | Description |
 |------|-------------|
-| `create_draft_invoice` | Create a draft invoice with named parameters (recipient, line items, payment terms). Returns ID + Lexoffice deep link. |
-| `create_and_send_invoice` | One-shot flow: create draft → finalize → send by email. **Irreversible.** |
-| `finalize_invoice` | Finalize a draft — assigns invoice number, makes non-editable. **Cannot be undone.** |
-| `send_invoice` | Send a finalized invoice by email. Validates status before sending. |
+| `create_draft_invoice` | Create an invoice with named parameters (recipient, line items, payment terms). Draft by default; `finalize=true` finalizes on create (**cannot be undone**). Returns ID + Lexoffice deep link. |
 | `delete_draft_invoice` | Delete a draft invoice (drafts only; finalized invoices cannot be deleted). |
 | `get_invoice` | Get full invoice details with deep link (edit link for drafts, view link for finalized). |
 | `get_invoice_pdf` | Render and get the document file ID for a finalized invoice PDF. |
 | `list_invoices` | List sales invoices with status filter. Computes `daysOverdue` for overdue items. |
 
-**Invoice flow**: `create_draft_invoice` → review in Lexoffice UI → `finalize_invoice` → `send_invoice` (or `create_and_send_invoice` for the one-shot path)
+**Invoice flow**: `create_draft_invoice` (optionally `finalize=true`) → send from the Lexoffice UI. Lexoffice only supports finalizing at create time (`POST /invoices?finalize=true`); there is no finalize or send endpoint for an existing invoice.
 
 ### Financial Queries
 
@@ -161,10 +158,8 @@ mcp-lexoffice.example.com {
 
 | Tool | Description |
 |------|-------------|
-| `create_draft_quotation` | Create a draft quotation with the same interface as invoices. |
-| `finalize_quotation` | Finalize a quotation — assigns Angebotsnummer. |
-| `pursue_quotation_to_invoice` | Convert a finalized quotation to a draft invoice (Angebot → Rechnung). |
-| `convert_quotation_and_send` | One-shot: convert a quotation to an invoice, finalize, and send. **Irreversible.** |
+| `create_draft_quotation` | Create a quotation with the same interface as invoices; `finalize=true` finalizes on create (**cannot be undone**). |
+| `pursue_quotation_to_invoice` | Convert a finalized quotation to a new draft invoice (Angebot → Rechnung). |
 | `list_quotations` | List quotations with status filter. |
 
 ### Recurring Templates (Wiederkehrende Rechnungen)
@@ -261,7 +256,7 @@ uv run pytest tests/ -v
 ```
 
 The test suite includes 297 tests covering:
-- All 41 MCP tools with parameter variations
+- All 36 MCP tools with parameter variations
 - Client HTTP methods with respx mocks
 - 429 retry logic and rate limiting
 - Error propagation (400, 401, 403, 404, 409, 422, 500)
@@ -277,7 +272,7 @@ mcp-lexoffice/
   mcp_lexoffice/
     __init__.py
     client.py          # Async HTTP client (httpx, rate limiting, 429 retry)
-    server.py           # FastMCP 3 server with 41 tools
+    server.py           # FastMCP 3 server with 36 tools
   tests/
     conftest.py         # Shared fixtures (respx mock, test client)
     test_client.py      # Client unit tests (80 tests)

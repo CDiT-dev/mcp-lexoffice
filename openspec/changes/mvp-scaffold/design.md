@@ -1,6 +1,6 @@
 ## Context
 
-mcp-lexoffice is a Python MCP server exposing Lexware Office REST API tools to Claude. It currently runs on FastMCP 2 with 1Password CLI key resolution, 15 raw API wrapper tools, and stdio transport. It needs to become a production Claude.ai connector on nebula-1 behind Caddy, with Claude-friendly tool signatures (named params, not raw JSON blobs).
+mcp-lexoffice is a Python MCP server exposing Lexware Office REST API tools to Claude. It currently runs on FastMCP 2 with 1Password CLI key resolution, 15 raw API wrapper tools, and stdio transport. It needs to become a production Claude.ai connector behind Caddy, with Claude-friendly tool signatures (named params, not raw JSON blobs).
 
 The server already has a working httpx client with rate limiting (2 req/s semaphore) and covers contacts, invoices, quotations, credit notes, vouchers, payment conditions, and countries. The upgrade reshapes this foundation rather than replacing it.
 
@@ -15,7 +15,7 @@ Lexware Office account: Casey does IT (CDIT), Kleinunternehmerregelung (vatfree)
 - Add invoice lifecycle tools: draft → finalize → send
 - Add voucher upload for Gmail bill ingestion
 - Add Phase 2 tools: financial queries, payment status, quotations, dunnings, articles, contacts
-- Deploy as Claude.ai custom connector via Caddy on nebula-1
+- Deploy as Claude.ai custom connector via Caddy
 
 **Non-Goals:**
 - n8n integration / webhook event subscriptions (BFF endpoint later)
@@ -38,7 +38,7 @@ Lexware Office account: Casey does IT (CDIT), Kleinunternehmerregelung (vatfree)
 
 **Choice**: Load `LEXOFFICE_API_KEY` from `.env` via `python-dotenv` at server startup. Keep the `op://` fallback for local dev convenience.
 
-**Why**: Production deployment on nebula-1 uses Docker environment variables injected by the compose file. The `.env` file is for local development only. Keeping the `op://` fallback costs nothing and helps Casey's local workflow.
+**Why**: Production deployment uses Docker environment variables injected by the compose file. The `.env` file is for local development only. Keeping the `op://` fallback costs nothing and helps Casey's local workflow.
 
 **Alternatives**: Remove 1Password entirely (loses dev convenience), use Docker secrets (overkill for single-operator).
 

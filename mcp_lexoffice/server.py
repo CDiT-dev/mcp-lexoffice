@@ -88,8 +88,7 @@ SERVER_INSTRUCTIONS = (
     "amount + vendor + optional PDF attach). Use upload_voucher only to drop a raw file in "
     "Beleg-Eingang without structuring it.\n"
     "- Contacts: find_or_create_contact for idempotent resolve-or-create; search_contacts to "
-    "browse; create_contact/update_contact for explicit CRUD. For accounting/invoice contacts "
-    "use this server; for CRM/chat contacts use watermelon.\n"
+    "browse; create_contact/update_contact for explicit CRUD.\n"
     "- Money owed: get_payment_status, get_contact_invoices, create_dunning (Mahnung) for "
     "overdue invoices.\n\n"
     "Irreversible actions (create_draft_invoice / create_draft_quotation with finalize=true, "
@@ -97,8 +96,7 @@ SERVER_INSTRUCTIONS = (
     "numbers or delete data and cannot be undone — confirm intent before calling. Reference data is also exposed as "
     "resources under the lexoffice:// scheme (countries, posting-categories, payment-conditions, "
     "service-catalog, status).\n\n"
-    "Service catalog: Digitale Sprechstunde (EUR 995 Pauschal), Consulting (EUR 150/Stunde), "
-    "Platform Development (EUR 1200/Tag)."
+    "See lexoffice://service-catalog for the service catalog and rates."
 )
 
 mcp = FastMCP(
@@ -163,8 +161,8 @@ class FinancialOverview(BaseModel):
 #                                Cloudflare portal already depend on); never rename the wire key
 #   - error: str | None        → the {"error": "..."} short-circuit payloads validate too
 #   - every field Optional w/ default & list fields default_factory=list → nothing is required
-# This is the exact shape that avoids the mcp-zernio output-schema bug (a model that only
-# validated the happy path and exploded on the error payload).
+# This is the exact shape that avoids the output-schema bug where a model only
+# validated the happy path and exploded on the error payload.
 
 
 class LexofficeBase(BaseModel):
@@ -1085,9 +1083,7 @@ async def search_contacts(
     role: Annotated[str | None, "Filter: customer, vendor, or both"] = None,
     page: Annotated[int, "Page number (0-indexed)"] = 0,
 ) -> ContactList:
-    """[finance] Search and filter contacts in Lexware Office.
-
-    Disambiguation: For accounting/invoice contacts → lexoffice. For CRM/chat contacts → watermelon."""
+    """[finance] Search and filter contacts in Lexware Office."""
     customer = None
     vendor = None
     if role == "customer":
@@ -1144,9 +1140,7 @@ async def create_contact(
     city: Annotated[str | None, "City"] = None,
     country_code: Annotated[str, "ISO country code"] = "DE",
 ) -> Contact:
-    """[finance] Create a new contact (company or person) in Lexware Office.
-
-    Disambiguation: For accounting/invoice contacts → lexoffice. For CRM/chat contacts → watermelon."""
+    """[finance] Create a new contact (company or person) in Lexware Office."""
     data: dict[str, Any] = {"version": 0, "roles": {role: {}}}
 
     if company_name:
@@ -1392,7 +1386,7 @@ async def list_articles(
 )
 async def create_article(
     ctx: Context,
-    name: Annotated[str, "Article name (e.g. 'Digitale Sprechstunde')"],
+    name: Annotated[str, "Article name (e.g. 'Consulting')"],
     net_price: Annotated[float, "Net price in EUR"],
     unit_name: Annotated[str, "Unit: Stunde, Tag, Pauschal, Stück"] = "Stück",
     article_type: Annotated[Literal["SERVICE", "PRODUCT"], "Article type"] = "SERVICE",
@@ -2084,13 +2078,10 @@ except ImportError:
 # clients can pull it deterministically (e.g. while drafting an invoice) without
 # spending a tool call. The live-API resources mirror their list_* tool counterparts.
 
-# The fixed service catalog used when drafting invoices/quotations. Kept here (and
-# summarized in the server instructions) so the model can read pricing as data.
-SERVICE_CATALOG = [
-    {"name": "Digitale Sprechstunde", "unit": "Pauschal", "net_price": 995, "currency": "EUR"},
-    {"name": "Consulting", "unit": "Stunde", "net_price": 150, "currency": "EUR"},
-    {"name": "Platform Development", "unit": "Tag", "net_price": 1200, "currency": "EUR"},
-]
+# The service catalog (offerings + list prices) used when drafting invoices/quotations.
+# Deployment data, not code: read from LEXOFFICE_SERVICE_CATALOG (a JSON list of
+# {"name", "unit", "net_price", "currency"}); see service-catalog.example.json.
+SERVICE_CATALOG_ENV = "LEXOFFICE_SERVICE_CATALOG"
 
 
 @mcp.resource(
@@ -2100,8 +2091,14 @@ SERVICE_CATALOG = [
     mime_type="application/json",
 )
 def service_catalog_resource() -> str:
-    """Standard service offerings and their list pricing (net, EUR)."""
-    return _fmt(SERVICE_CATALOG)
+    """Standard service offerings and their list pricing, from LEXOFFICE_SERVICE_CATALOG."""
+    raw = os.environ.get(SERVICE_CATALOG_ENV, "").strip()
+    if not raw:
+        return _fmt({"error": f"No service catalog configured (set {SERVICE_CATALOG_ENV})."})
+    try:
+        return _fmt(json.loads(raw))
+    except json.JSONDecodeError as exc:
+        return _fmt({"error": f"{SERVICE_CATALOG_ENV} is not valid JSON: {exc}"})
 
 
 @mcp.resource(

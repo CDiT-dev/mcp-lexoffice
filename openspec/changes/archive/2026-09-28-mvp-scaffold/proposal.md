@@ -1,6 +1,6 @@
 ## Why
 
-mcp-lexoffice exists as a skeleton (FastMCP 2, 1Password key resolution, 15 raw tools) but doesn't work as a Claude.ai connector yet and can't handle the two things Casey needs _today_: **sending invoices** and **ingesting bills from Gmail**. CDI-670 is In Progress with a due date of 2026-03-16. The server needs to upgrade to FastMCP 3 with streamable-http + `json_response=True` (required for Claude.ai connector init), switch to `.env`-based bearer token auth for production deployment behind Caddy, and reshape the tools from raw API wrappers into Claude-friendly flows (draft → review → finalize → send).
+mcp-lexoffice exists as a skeleton (FastMCP 2, 1Password key resolution, 15 raw tools) but doesn't work as a Claude.ai connector yet and can't handle the two things Casey needs _today_: **sending invoices** and **ingesting bills from Gmail**. CDI-670 is In Progress with a due date of 2026-03-16. The server needs to upgrade to FastMCP 3 with streamable-http + `json_response=True` (required for Claude.ai connector init), switch to `.env`-based bearer token auth for production deployment behind a reverse proxy, and reshape the tools from raw API wrappers into Claude-friendly flows (draft → review → finalize → send).
 
 Beyond the immediate MVP, CDI-677 (Phase 2) scopes a full accounting assistant — voucherlist queries, payment status, quotations, dunnings, articles, and contacts. This proposal covers both phases in a single scaffold so implementation can be prioritized without re-architecting. Webhook/n8n integration is out of scope — a BFF endpoint will be offered later.
 
@@ -26,7 +26,7 @@ Beyond the immediate MVP, CDI-677 (Phase 2) scopes a full accounting assistant �
 - **Contacts** (CDI-680): `search_contacts`, `get_contact`, `create_contact`, `update_contact` — already exist but need Claude-friendly reshaping
 - **Quotations** (CDI-681): `create_draft_quotation`, `finalize_quotation`, `pursue_quotation_to_invoice` (Angebot → Rechnung pipeline)
 - **Dunnings** (CDI-682): `create_dunning` for overdue invoice reminders
-- **Articles** (CDI-683): CRUD for reusable service catalog (Sprechstunde €995, Consulting €150/h, Platform Dev €1200/d)
+- **Articles** (CDI-683): CRUD for reusable service catalog
 - ~~Event subscriptions~~ — deferred, BFF endpoint later
 
 ### Testing & validation
@@ -55,6 +55,6 @@ Beyond the immediate MVP, CDI-677 (Phase 2) scopes a full accounting assistant �
 - **mcp_lexoffice/client.py**: Remove 1Password CLI resolution, load from env/dotenv. Add payment, dunning, article, file upload endpoints.
 - **mcp_lexoffice/server.py**: Rewrite all tool decorators for FastMCP 3 API. Reshape tool signatures from raw JSON to named parameters. Add `json_response=True` to server config.
 - **New**: `.env` file with `LEXOFFICE_API_KEY=...`
-- **Deployment**: Docker container behind Caddy (CDI-525, already done)
+- **Deployment**: Docker container behind a reverse proxy (CDI-525, already done)
 - **Downstream consumers**: Besserwisser dashboard (CDI-544) will consume the same Lexoffice API — shared cache layer possible. MegaFön (CDI-354) will connect via a future BFF endpoint.
 - **Linear issues**: CDI-670 (MVP), CDI-672, CDI-673, CDI-674, CDI-675, CDI-677, CDI-678–684, CDI-94, CDI-544, CDI-347

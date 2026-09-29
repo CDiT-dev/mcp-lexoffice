@@ -49,7 +49,7 @@
 - [x] 7.3 Add `create_article` tool — name, type, net_price, unit_name, description; vatfree default
 - [x] 7.4 Add `get_article` tool
 - [x] 7.5 Add `update_article` tool — with version param for optimistic locking
-- [x] 7.6 Document CDiT service catalog in server instructions (Sprechstunde €995, Consulting €150/h, Platform Dev €1200/d)
+- [x] 7.6 Document CDiT service catalog in server instructions
 
 ## 8. Contacts Reshape (Phase 2 — CDI-680)
 

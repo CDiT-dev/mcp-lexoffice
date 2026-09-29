@@ -36,5 +36,5 @@ The server SHALL provide an `update_article` tool with optimistic locking.
 The server instructions SHALL document the standard CDiT service catalog for Claude to use when creating articles.
 
 #### Scenario: Claude knows CDiT service offerings
-- **WHEN** Claude is asked to create an invoice for a "Sprechstunde" or "consulting"
-- **THEN** Claude can reference the documented catalog: Digitale Sprechstunde (€995 Pauschal), Consulting hourly (€150/Stunde), Platform Development daily (€1200/Tag)
+- **WHEN** Claude is asked to create an invoice for a catalog service
+- **THEN** Claude can reference the documented service catalog

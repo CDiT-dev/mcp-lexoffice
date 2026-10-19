@@ -31,7 +31,10 @@ ENV MCP_PORT=8000
 
 EXPOSE 8000
 
+# Probe the address the server actually binds: same MCP_HOST/MCP_PORT (and defaults) as
+# server.py main(). Wildcard binds (0.0.0.0, ::) are probed on loopback; a specific bind
+# (e.g. the tailnet IP under host networking, where nothing listens on 127.0.0.1) is probed as-is.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-  CMD python3 -c "import urllib.request,json,sys; r=urllib.request.urlopen('http://localhost:8000/health',timeout=3); d=json.loads(r.read()); sys.exit(0 if d.get('status')=='healthy' else 1)"
+  CMD python3 -c "import os,json,urllib.request as u; h=os.environ.get('MCP_HOST','0.0.0.0'); h='127.0.0.1' if h in ('','0.0.0.0','::') else h; h='['+h+']' if ':' in h else h; d=json.load(u.urlopen('http://%s:%s/health' % (h, os.environ.get('MCP_PORT','8000')), timeout=3)); raise SystemExit(d.get('status') != 'healthy')"
 
 CMD ["mcp-lexoffice"]

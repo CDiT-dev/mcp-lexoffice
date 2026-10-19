@@ -7,6 +7,11 @@ services:
       - LEXOFFICE_SERVICE_CATALOG=${LEXOFFICE_SERVICE_CATALOG:-}
       - MCP_TRANSPORT=streamable-http
       - MCP_PORT=${HOST_PORT:-8001}
+      # Host network: the Dockerfile default MCP_HOST=0.0.0.0 listens on every interface, and
+      # ufw/DOCKER-USER do not cover host-network services. Bind the tailnet IP only (werkstatt-1:
+      # 100.114.39.108, from the Komodo stack environment). Not 127.0.0.1: cloudflared reaches it
+      # via the tailnet IP. Unset = compose refuses to render. See fleet-stacks SECURITY.md.
+      - MCP_HOST=${BIND_IP:?set BIND_IP (tailnet IP) in the stack environment}
       - MCP_API_KEY=${MCP_API_KEY:-}
       - FASTMCP_HOME=/data/fastmcp
     volumes:

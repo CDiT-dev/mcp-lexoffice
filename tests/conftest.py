@@ -10,6 +10,7 @@ import pytest
 import respx
 
 from mcp_lexoffice.client import BASE_URL, LexofficeClient
+from mcp_lexoffice.config import get_settings
 
 
 @pytest.fixture(autouse=True)
@@ -28,5 +29,8 @@ def mock_api():
 @pytest.fixture()
 def client(mock_api):
     """LexofficeClient with a fake API key (requests hit respx mocks)."""
+    # Settings are lru_cached; importing the server first caches them without the key.
+    get_settings.cache_clear()
     with patch.dict(os.environ, {"LEXOFFICE_API_KEY": "test-key-000"}):
-        return LexofficeClient()
+        yield LexofficeClient()
+    get_settings.cache_clear()

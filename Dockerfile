@@ -11,7 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 COPY pyproject.toml uv.lock README.md ./
 COPY mcp_lexoffice/ mcp_lexoffice/
 
-RUN pip install --no-cache-dir uv \
+RUN pip install --no-cache-dir uv==0.13.5 \
     && uv export --frozen --no-dev --no-emit-project -o /tmp/requirements.txt \
     && pip install --no-cache-dir --require-hashes -r /tmp/requirements.txt \
     && pip install --no-cache-dir --no-deps . \

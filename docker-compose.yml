@@ -1,6 +1,7 @@
 services:
   mcp-lexoffice:
     build: .
+    init: true
     network_mode: host
     environment:
       - LEXOFFICE_API_KEY=${LEXOFFICE_API_KEY}
@@ -17,6 +18,11 @@ services:
     volumes:
       - fastmcp-data:/data/fastmcp
     restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 volumes:
   fastmcp-data:

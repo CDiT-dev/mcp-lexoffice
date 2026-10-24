@@ -1395,6 +1395,78 @@ async def test_get_payment_status_by_contact_payment_error():
     assert parsed[0]["payment"]["status"] == "unknown"
 
 
+# ── Voucherlist row id, end to end through the real client (CDI-2081) ──
+
+# Key set recorded from a live GET /voucherlist row on 2026-10-24 (matches the documented
+# voucherlist properties); values are fake. The row id is `id`; there is no `voucherId`.
+VOUCHERLIST_ROW = {
+    "id": "78a86a17-0000-4000-8000-000000000001",
+    "voucherType": "salesinvoice",
+    "voucherStatus": "open",
+    "voucherNumber": "RE0042",
+    "voucherDate": "2026-08-17T00:00:00.000+02:00",
+    "createdDate": "2026-08-17T19:21:23.000+02:00",
+    "updatedDate": "2026-09-11T16:49:34.000+02:00",
+    "dueDate": "2099-12-31T00:00:00.000+01:00",
+    "contactId": "1fb08e46-0000-4000-8000-000000000002",
+    "contactName": "Acme GmbH",
+    "totalAmount": 600,
+    "openAmount": 600,
+    "currency": "EUR",
+    "archived": False,
+}
+
+
+def _voucherlist_page(*rows):
+    return {"content": list(rows), "totalPages": 1, "totalElements": len(rows), "last": True}
+
+
+@pytest.mark.parametrize(
+    ("tool", "kwargs"),
+    [
+        ("list_invoices", {}),
+        ("list_quotations", {}),
+        ("list_expenses", {}),
+        ("list_vouchers", {"voucher_type": "creditnote"}),
+        ("get_contact_invoices", {"contact_id": "1fb08e46-0000-4000-8000-000000000002"}),
+    ],
+)
+async def test_voucherlist_row_id_fills_deeplink(client, mock_api, tool, kwargs):
+    import mcp_lexoffice.server as server
+
+    mock_api.get("/voucherlist").respond(200, json=_voucherlist_page(dict(VOUCHERLIST_ROW)))
+    result = await getattr(server, tool)(FakeContext(client), **kwargs)
+    entry = as_dict(result)["content"][0]
+    assert entry["deepLink"] == _deep_link(VOUCHERLIST_ROW["id"])
+    assert entry["voucherId"] == VOUCHERLIST_ROW["id"]
+
+
+async def test_get_payment_status_by_contact_uses_row_id(client, mock_api):
+    from mcp_lexoffice.server import get_payment_status
+
+    vid = VOUCHERLIST_ROW["id"]
+    mock_api.get("/voucherlist").respond(200, json=_voucherlist_page(dict(VOUCHERLIST_ROW)))
+    payments = mock_api.get(f"/payments/{vid}").respond(200, json={"openAmount": 600})
+
+    parsed = as_dict(await get_payment_status(FakeContext(client), contact_name="acme"))
+    assert payments.call_count == 1
+    assert parsed[0]["voucherId"] == vid
+    assert parsed[0]["payment"] == {"openAmount": 600}
+    assert parsed[0]["deepLink"] == _deep_link(vid)
+
+
+async def test_get_payment_status_by_contact_missing_id_is_a_tool_error(client, mock_api):
+    from mcp_lexoffice.server import get_payment_status
+
+    row = {k: v for k, v in VOUCHERLIST_ROW.items() if k != "id"}
+    mock_api.get("/voucherlist").respond(200, json=_voucherlist_page(row))
+    payments = mock_api.get(url__regex=r"/payments/").respond(200, json={})
+
+    with pytest.raises(ToolError, match="RE0042"):
+        await get_payment_status(FakeContext(client), contact_name="acme")
+    assert not payments.called
+
+
 # ── Contact tools ────────────────────────────────────────────────────
 
 

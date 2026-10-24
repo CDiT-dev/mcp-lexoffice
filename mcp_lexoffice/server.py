@@ -1077,7 +1077,15 @@ async def get_payment_status(
         ]
         results = []
         for v in matches:
-            vid = v.get("voucherId", "")
+            vid = v.get("voucherId")
+            if not vid:
+                # An empty id would hit GET /payments/ and the except below would report
+                # "unknown", a plausible answer for a lookup that never happened (CDI-2081).
+                raise ToolError(
+                    f"Voucher {v.get('voucherNumber') or '(no number)'} for "
+                    f"{v.get('contactName')!r} came back from the voucherlist without an id; "
+                    "cannot look up its payments."
+                )
             try:
                 payment = await _client(ctx).get_payments(vid)
             except Exception:

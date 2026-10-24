@@ -307,7 +307,14 @@ class LexofficeClient:
         if contact_id:
             params["contactId"] = contact_id
         resp = await self._request("GET", "/voucherlist", params=params)
-        return resp.json()
+        data = resp.json()
+        # CDI-2081: voucherlist rows carry their id as `id` (no `voucherId` exists in the
+        # API), but every reader (deep links, get_payment_status) and the existing
+        # VoucherListEntry.voucherId output field expect `voucherId`. Fill it here, once.
+        for row in data.get("content") or []:
+            if row.get("id"):
+                row["voucherId"] = row["id"]
+        return data
 
     async def get_voucher(self, voucher_id: str) -> dict:
         resp = await self._request("GET", f"/vouchers/{voucher_id}")

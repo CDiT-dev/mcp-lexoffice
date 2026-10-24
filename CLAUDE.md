@@ -88,7 +88,9 @@ Reference/context data exposed as resources so the model can pull it without a t
 - `capture_receipt` — Belegfänger flow: find_or_create_contact → create_voucher (+ optional PDF)
 
 ## API Notes
-- Rate limit: 2 requests/second (HTTP 429 on exceed, auto-retry with Retry-After)
+- Rate limit: 2 requests/second per token (HTTP 429 on exceed). `client.py` starts every request through one limiter, 0.6 s apart; a 429 holds back all callers for Retry-After (or 1/2/4 s backoff) and retries up to 3 times
+- voucherlist: `voucherStatus=any` is valid for every type; `overdue` combined with another status is a 400, so `filter_vouchers` refuses it with a ToolError
+- Streamable-HTTP request bodies are capped at 8 MiB (`server.py::MAX_REQUEST_BODY_BYTES`, raised from the SDK's 4 MiB so base64 files up to Lexoffice's 5 MB fit)
 - All mutations use optimistic locking via `version` field
 - Invoice statuses: draft → open (finalized) → paidoff / voided
 - All tools return deep links to Lexoffice UI

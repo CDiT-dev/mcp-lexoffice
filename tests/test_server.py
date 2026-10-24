@@ -199,6 +199,18 @@ class TestBuildLineItems:
         items = _build_line_items([])
         assert items == []
 
+    def test_gross_account_sends_gross_amount(self):
+        """CDI-2080: Lexoffice reads grossAmount when taxType is gross; netAmount there is a 406."""
+        price = _build_line_items([{"name": "X", "unit_price": 119}], tax_type="gross")[0]["unitPrice"]
+        assert price["grossAmount"] == 119
+        assert "netAmount" not in price
+
+    def test_net_and_vatfree_accounts_send_net_amount(self):
+        for tax_type in ("net", "vatfree"):
+            price = _build_line_items([{"name": "X", "unit_price": 100}], tax_type=tax_type)[0]["unitPrice"]
+            assert price["netAmount"] == 100
+            assert "grossAmount" not in price
+
     def test_tax_rate_always_zero(self):
         """Kleinunternehmer: tax rate should always be 0."""
         items = _build_line_items([{"name": "X", "unit_price": 99}])
@@ -304,6 +316,20 @@ async def test_create_draft_invoice_tool():
     assert invoice_data["taxConditions"]["taxType"] == "vatfree"
     assert invoice_data["address"]["name"] == "Acme GmbH"
     assert invoice_data["lineItems"][0]["unitPrice"]["taxRatePercentage"] == 0
+
+
+async def test_create_draft_invoice_on_gross_account_sends_gross_prices():
+    from mcp_lexoffice.server import create_draft_invoice
+
+    ctx = make_ctx({"create_invoice": {"id": "inv-g"}}, tax_type="gross")
+    await create_draft_invoice(
+        ctx, recipient_name="Acme", line_items=[{"name": "Consulting", "unit_price": 119}],
+    )
+    invoice_data = ctx.lifespan_context["lexoffice"].create_invoice.call_args[0][0]
+    assert invoice_data["taxConditions"]["taxType"] == "gross"
+    assert invoice_data["lineItems"][0]["unitPrice"] == {
+        "currency": "EUR", "grossAmount": 119, "taxRatePercentage": 19,
+    }
 
 
 async def test_create_draft_invoice_deep_link_is_edit():

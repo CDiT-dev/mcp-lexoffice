@@ -4,16 +4,36 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from typing import Any
 
 import httpx
 from dotenv import load_dotenv
+from fastmcp.exceptions import ToolError
 
 from .config import get_settings
 
 load_dotenv()
 
 BASE_URL = "https://api.lexoffice.io/v1"
+
+# Lexoffice allows 2 requests/second per token (token bucket) and answers 429 without
+# performing the call. Space request starts a little wider than 0.5 s: the docs warn that
+# pacing at exactly the limit still gets rate limited because of network jitter.
+_MIN_INTERVAL = 0.6
+# 429 retries per request, and the wait used when there is no numeric Retry-After
+# (doubles per retry). Each wait is capped so a tool call can't hang on one request.
+_MAX_429_RETRIES = 3
+_BACKOFF_BASE = 1.0
+_MAX_RETRY_WAIT = 10.0
+
+
+def _retry_wait(resp: httpx.Response, attempt: int) -> float:
+    try:
+        wait = float(resp.headers["Retry-After"])
+    except (KeyError, ValueError):
+        wait = _BACKOFF_BASE * 2**attempt
+    return min(max(wait, 0.0), _MAX_RETRY_WAIT)
 
 
 class LexofficeClient:
@@ -34,7 +54,17 @@ class LexofficeClient:
             },
             timeout=30.0,
         )
-        self._semaphore = asyncio.Semaphore(2)  # respect 2 req/s rate limit
+        # One client per server process (lifespan), so this paces every tool call together.
+        self._throttle_lock = asyncio.Lock()
+        self._next_slot = 0.0
+
+    async def _throttle(self) -> None:
+        """Wait until this request may start: starts are at least _MIN_INTERVAL apart."""
+        async with self._throttle_lock:
+            wait = self._next_slot - time.monotonic()
+            if wait > 0:
+                await asyncio.sleep(wait)
+            self._next_slot = time.monotonic() + _MIN_INTERVAL
 
     async def _request(
         self,
@@ -48,37 +78,37 @@ class LexofficeClient:
         accept: str | None = None,
         content_type: str | None = None,
     ) -> httpx.Response:
-        async with self._semaphore:
-            headers: dict[str, str] = {}
-            if accept:
-                headers["Accept"] = accept
-            # Don't set Content-Type when uploading files: httpx must set
-            # multipart/form-data with its own boundary.
-            if content_type and files is None:
-                headers["Content-Type"] = content_type
+        headers: dict[str, str] = {}
+        if accept:
+            headers["Accept"] = accept
+        # Don't set Content-Type when uploading files: httpx must set
+        # multipart/form-data with its own boundary.
+        if content_type and files is None:
+            headers["Content-Type"] = content_type
+        # Retrying is safe for writes too: Lexoffice performs no part of a 429'd call.
+        for attempt in range(_MAX_429_RETRIES + 1):
+            await self._throttle()
             resp = await self._client.request(
                 method, path, params=params, json=json, content=content, files=files, headers=headers
             )
-            if resp.status_code == 429:
-                retry_after = float(resp.headers.get("Retry-After", "1"))
-                await asyncio.sleep(retry_after)
-                resp = await self._client.request(
-                    method, path, params=params, json=json, content=content, files=files, headers=headers
-                )
-            if resp.status_code >= 400:
-                try:
-                    error_body = json.dumps(resp.json(), indent=2, ensure_ascii=False, default=str)
-                except Exception:
-                    error_body = resp.text
-                try:
-                    resp.raise_for_status()
-                except httpx.HTTPStatusError as e:
-                    raise httpx.HTTPStatusError(
-                        f"{e}\nLexoffice response: {error_body}",
-                        request=e.request,
-                        response=e.response,
-                    ) from e
-            return resp
+            if resp.status_code != 429 or attempt == _MAX_429_RETRIES:
+                break
+            # The bucket is per token, so hold back every caller, not just this retry.
+            self._next_slot = max(self._next_slot, time.monotonic() + _retry_wait(resp, attempt))
+        if resp.status_code >= 400:
+            try:
+                error_body = json.dumps(resp.json(), indent=2, ensure_ascii=False, default=str)
+            except Exception:
+                error_body = resp.text
+            try:
+                resp.raise_for_status()
+            except httpx.HTTPStatusError as e:
+                raise httpx.HTTPStatusError(
+                    f"{e}\nLexoffice response: {error_body}",
+                    request=e.request,
+                    response=e.response,
+                ) from e
+        return resp
 
     # ── Profile ──────────────────────────────────────────────────────
 
@@ -259,6 +289,15 @@ class LexofficeClient:
         page: int = 0,
         size: int = 100,
     ) -> dict:
+        statuses = [s.strip() for s in (voucher_status or "").split(",") if s.strip()]
+        if "overdue" in statuses and len(statuses) > 1:
+            # Lexoffice answers 400 "voucherStatus filter 'overdue' cannot be used in
+            # combination with other states".
+            raise ToolError(
+                "Lexoffice rejects status 'overdue' combined with other statuses. "
+                "Use status='overdue' on its own, or status='open' (overdue vouchers are "
+                "open vouchers past their due date, so they are included)."
+            )
         params: dict[str, Any] = {
             "page": page,
             "size": size,

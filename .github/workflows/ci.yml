@@ -8,6 +8,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -19,5 +23,13 @@ jobs:
       - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           enable-cache: true
-      - run: uv sync
+      - run: uv sync --locked
+
+      # Audit the LOCKED runtime+dev deps, not pip-audit's own ephemeral venv (bare
+      # `uvx pip-audit` audits nothing of ours). Same form as mcp-stolperfalle security.yml.
+      - name: Security audit (locked deps)
+        run: |
+          uv export --frozen --format requirements-txt --no-emit-project -o requirements-audit.txt
+          uvx pip-audit==2.9.0 --no-deps --disable-pip -r requirements-audit.txt
+
       - run: uv run pytest

@@ -5,12 +5,15 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import time
 from unittest.mock import patch
 
 import httpx
 import pytest
 import respx
+from fastmcp.exceptions import ToolError
 
+from mcp_lexoffice import client as client_mod
 from mcp_lexoffice.client import LexofficeClient, BASE_URL
 from mcp_lexoffice.config import get_settings
 
@@ -51,11 +54,6 @@ class TestClientInit:
         with patch.dict(os.environ, {"LEXOFFICE_API_KEY": "my-key"}):
             c = LexofficeClient()
             assert "Content-Type" not in c._client.headers
-
-    def test_semaphore_has_value_2(self):
-        with patch.dict(os.environ, {"LEXOFFICE_API_KEY": "my-key"}):
-            c = LexofficeClient()
-            assert c._semaphore._value == 2
 
     def test_timeout_is_30(self):
         with patch.dict(os.environ, {"LEXOFFICE_API_KEY": "my-key"}):
@@ -296,6 +294,20 @@ async def test_filter_vouchers_default_status(client, mock_api):
     await client.filter_vouchers("invoice")
     url = str(route.calls[0].request.url)
     assert "voucherStatus=any" in url
+
+
+async def test_filter_vouchers_overdue_mixed_is_a_tool_error(client, mock_api):
+    """CDI-2080: Lexoffice 400s on 'overdue' combined with other states; say so up front."""
+    route = mock_api.get("/voucherlist").respond(200, json={"content": []})
+    with pytest.raises(ToolError, match="overdue"):
+        await client.filter_vouchers("salesinvoice,invoice", voucher_status="open, overdue")
+    assert not route.called
+
+
+async def test_filter_vouchers_overdue_alone_is_sent(client, mock_api):
+    route = mock_api.get("/voucherlist").respond(200, json={"content": []})
+    await client.filter_vouchers("salesinvoice,invoice", voucher_status="overdue")
+    assert route.calls.last.request.url.params["voucherStatus"] == "overdue"
 
 
 async def test_filter_vouchers_default_pagination(client, mock_api):
@@ -562,6 +574,71 @@ async def test_429_retry_second_attempt_also_fails(client, mock_api):
     with pytest.raises(httpx.HTTPStatusError) as exc_info:
         await client.get_profile()
     assert exc_info.value.response.status_code == 500
+
+
+async def test_429_retries_are_bounded(client, mock_api):
+    route = mock_api.get("/profile")
+    route.side_effect = [httpx.Response(429, headers={"Retry-After": "0"})] * 10
+    with pytest.raises(httpx.HTTPStatusError) as exc_info:
+        await client.get_profile()
+    assert exc_info.value.response.status_code == 429
+    assert route.call_count == client_mod._MAX_429_RETRIES + 1
+
+
+async def test_429_waits_for_retry_after(client, mock_api):
+    route = mock_api.get("/profile")
+    route.side_effect = [
+        httpx.Response(429, headers={"Retry-After": "0.2"}),
+        httpx.Response(200, json={"ok": True}),
+    ]
+    start = time.monotonic()
+    assert (await client.get_profile())["ok"] is True
+    assert time.monotonic() - start >= 0.2
+
+
+async def test_429_without_retry_after_backs_off_exponentially(client, mock_api, monkeypatch):
+    monkeypatch.setattr(client_mod, "_BACKOFF_BASE", 0.05)
+    route = mock_api.get("/profile")
+    route.side_effect = [httpx.Response(429), httpx.Response(429), httpx.Response(200, json={"ok": True})]
+    start = time.monotonic()
+    assert (await client.get_profile())["ok"] is True
+    assert time.monotonic() - start >= 0.05 + 0.1
+
+
+def test_retry_wait_is_capped_and_ignores_unparseable_values():
+    assert client_mod._retry_wait(httpx.Response(429, headers={"Retry-After": "3600"}), 0) == client_mod._MAX_RETRY_WAIT
+    http_date = httpx.Response(429, headers={"Retry-After": "Sat, 24 Oct 2026 18:00:00 GMT"})
+    assert client_mod._retry_wait(http_date, 1) == client_mod._BACKOFF_BASE * 2
+
+
+async def test_429_holds_back_other_callers_too(client, mock_api):
+    """The bucket is per token: a request issued while another waits out a 429 waits too."""
+    profile = mock_api.get("/profile")
+    profile.side_effect = [
+        httpx.Response(429, headers={"Retry-After": "0.3"}),
+        httpx.Response(200, json={"ok": True}),
+    ]
+    mock_api.get("/countries").respond(200, json=[])
+
+    async def countries_after_the_429():
+        await asyncio.sleep(0.05)
+        t = time.monotonic()
+        await client.list_countries()
+        return time.monotonic() - t
+
+    _, waited = await asyncio.gather(client.get_profile(), countries_after_the_429())
+    assert waited >= 0.2
+
+
+async def test_requests_are_paced_across_concurrent_callers(client, mock_api, monkeypatch):
+    """Every request goes through one limiter, so concurrent tool calls can't burst past
+    Lexoffice's 2 req/s."""
+    monkeypatch.setattr(client_mod, "_MIN_INTERVAL", 0.1)
+    route = mock_api.get("/profile").respond(200, json={"ok": True})
+    start = time.monotonic()
+    await asyncio.gather(*(client.get_profile() for _ in range(4)))
+    assert route.call_count == 4
+    assert time.monotonic() - start >= 0.3
 
 
 # ── Error handling ───────────────────────────────────────────────────

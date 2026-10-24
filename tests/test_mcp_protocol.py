@@ -11,6 +11,8 @@ other in-memory round trip (list tools, client object swapped out).
 
 from __future__ import annotations
 
+import base64
+import json
 import os
 from unittest.mock import patch
 
@@ -19,7 +21,7 @@ import pytest
 from fastmcp import Client
 
 from mcp_lexoffice.config import get_settings
-from mcp_lexoffice.server import mcp
+from mcp_lexoffice.server import MAX_REQUEST_BODY_BYTES, mcp
 
 EXPECTED_TOOLS = {
     "get_profile", "get_invoice", "list_invoices", "create_draft_invoice",
@@ -101,3 +103,39 @@ async def test_a_tool_call_emits_one_usage_line(wire_env, mock_api, capfd):
     assert '"server": "lexoffice"' in lines[0]
     assert '"tool": "get_profile"' in lines[0]
     assert '"outcome": "ok"' in lines[0]
+
+
+async def _post_mcp(body: bytes) -> httpx.Response:
+    """POST a raw JSON-RPC body to the real streamable-HTTP app (lifespan included)."""
+    app = mcp.http_app(stateless_http=True, json_response=True)
+    async with app.router.lifespan_context(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
+            return await http.post("/mcp", content=body, headers={
+                "content-type": "application/json",
+                "accept": "application/json, text/event-stream",
+                "mcp-protocol-version": "2025-11-25",
+            })
+
+
+async def test_upload_bigger_than_sdk_default_body_cap_reaches_the_tool(wire_env, mock_api):
+    """CDI-2080: a 4.5 MB receipt is ~6 MB of base64, over the SDK's 4 MiB default. It used
+    to get a bare 413 before the tool ran; now it reaches Lexoffice like any other upload."""
+    files = mock_api.post("/files").respond(200, json={"id": "file-1"})
+    pdf = b"%PDF" + b"x" * 4_500_000
+    body = json.dumps({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": "upload_voucher", "arguments": {
+            "file_content": base64.b64encode(pdf).decode(), "file_name": "receipt.pdf",
+        }},
+    }).encode()
+    assert len(body) > 4 * 1024 * 1024
+    resp = await _post_mcp(body)
+    assert resp.status_code == 200
+    assert resp.json()["result"]["isError"] is False
+    assert files.call_count == 1
+
+
+async def test_body_over_the_raised_cap_is_still_refused(wire_env):
+    resp = await _post_mcp(b"x" * (MAX_REQUEST_BODY_BYTES + 1))
+    assert resp.status_code == 413

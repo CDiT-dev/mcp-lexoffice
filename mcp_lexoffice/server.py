@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 from datetime import date, datetime, timezone
 from typing import Annotated, Any, Literal
 
+import fastmcp.server.http as _fastmcp_http
 import httpx
 from fastmcp import FastMCP, Context
 from fastmcp.exceptions import ToolError
@@ -98,6 +99,28 @@ SERVER_INSTRUCTIONS = (
     "service-catalog, status).\n\n"
     "See lexoffice://service-catalog for the service catalog and rates."
 )
+
+# CDI-2080: the MCP SDK answers streamable-HTTP request bodies over 4 MiB with a bare 413
+# before any tool runs. Base64 inflates a file by 4/3, so a receipt between ~3 MB and the
+# 5 MB Lexoffice accepts never reached upload_voucher / attach_voucher_file / create_voucher,
+# and the caller got no tool error to act on. 8 MiB admits every file Lexoffice accepts
+# (5 MiB -> ~6.7 MiB of base64 plus the JSON-RPC envelope); a file a little over 5 MB now
+# reaches the tool's own size check and gets a clear tool error. Bearer auth is checked
+# before the body is read.
+MAX_REQUEST_BODY_BYTES = 8 * 1024 * 1024
+
+
+class _SessionManager(_fastmcp_http.FastMCPStreamableHTTPSessionManager):
+    # ponytail: fastmcp 4.1.3 does not pass the SDK's max_request_body_size through, so this
+    # swaps in a subclass of the session manager it builds. Drop it once fastmcp takes the
+    # setting; tests/test_mcp_protocol.py fails if the swap stops applying.
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.max_request_body_size = MAX_REQUEST_BODY_BYTES
+        self.asgi_app.max_body_size = MAX_REQUEST_BODY_BYTES
+
+
+_fastmcp_http.FastMCPStreamableHTTPSessionManager = _SessionManager
 
 mcp = FastMCP(
     "Lexware Office",
@@ -569,8 +592,14 @@ async def _default_purchase_category_id(ctx: Context, *, has_contact: bool = Tru
     return category_id
 
 
-def _build_line_items(items: list[dict], *, default_tax_rate: int = 0) -> list[dict]:
-    """Convert simplified line items to Lexoffice format."""
+def _build_line_items(
+    items: list[dict], *, default_tax_rate: int = 0, tax_type: str = "net"
+) -> list[dict]:
+    """Convert simplified line items to Lexoffice format.
+
+    Lexoffice reads unitPrice.grossAmount when taxConditions.taxType is gross and
+    netAmount otherwise; sending the other one is rejected with HTTP 406."""
+    amount_key = "grossAmount" if tax_type == "gross" else "netAmount"
     result = []
     for item in items:
         li: dict[str, Any] = {
@@ -580,7 +609,7 @@ def _build_line_items(items: list[dict], *, default_tax_rate: int = 0) -> list[d
             "unitName": item.get("unit_name", "Stück"),
             "unitPrice": {
                 "currency": item.get("currency", "EUR"),
-                "netAmount": item["unit_price"],
+                amount_key: item["unit_price"],
                 "taxRatePercentage": item.get("tax_rate", default_tax_rate),
             },
         }
@@ -643,7 +672,8 @@ async def create_draft_invoice(
     recipient_name: Annotated[str, "Company or person name for the invoice recipient"],
     line_items: Annotated[
         list[dict[str, Any]],
-        "Line items. Each: {name, unit_price, quantity?, unit_name?, description?, tax_rate?}",
+        "Line items. Each: {name, unit_price, quantity?, unit_name?, description?, tax_rate?}. "
+        "unit_price is net, or gross when the account's tax type is gross.",
     ],
     contact_id: Annotated[str | None, "UUID of an existing Lexoffice contact (links invoice to contact record)"] = None,
     street: Annotated[str | None, "Recipient street address"] = None,
@@ -652,7 +682,7 @@ async def create_draft_invoice(
     country_code: Annotated[str, "ISO country code"] = "DE",
     currency: Annotated[str, "Currency code"] = "EUR",
     payment_term_duration: Annotated[int | None, "Payment term in days (e.g. 14)"] = None,
-    title: Annotated[str, "Invoice title"] = "Rechnung",
+    title: Annotated[str, "Invoice title (max 25 characters, a Lexoffice limit)"] = "Rechnung",
     introduction: Annotated[str | None, "Introduction text above line items"] = None,
     remark: Annotated[str | None, "Closing remark below line items"] = None,
     tax_rate: Annotated[int | None, "Override tax rate percentage for all line items"] = None,
@@ -675,7 +705,9 @@ async def create_draft_invoice(
     data: dict[str, Any] = {
         "voucherDate": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000+00:00"),
         "address": address,
-        "lineItems": _build_line_items(line_items, default_tax_rate=effective_rate),
+        "lineItems": _build_line_items(
+            line_items, default_tax_rate=effective_rate, tax_type=tax_config["tax_type"]
+        ),
         "totalPrice": {"currency": currency},
         "taxConditions": {"taxType": tax_config["tax_type"]},
         "shippingConditions": {"shippingType": "none"},
@@ -785,7 +817,7 @@ async def list_invoices(
     status: Annotated[
         str | None,
         "Filter: draft, open, paid, paidoff, voided, overdue, unchecked "
-        "(comma-separated for multiple). 'unchecked' = uploaded Belege awaiting review.",
+        "(comma-separated for multiple; overdue only on its own). 'unchecked' = uploaded Belege awaiting review.",
     ] = None,
     page: Annotated[int, "Page number (0-indexed)"] = 0,
 ) -> VoucherList:
@@ -861,7 +893,7 @@ async def upload_voucher(
 )
 async def list_expenses(
     ctx: Context,
-    status: Annotated[str | None, "Filter: draft, open, paid, paidoff, voided, overdue, unchecked (comma-separated)"] = None,
+    status: Annotated[str | None, "Filter: draft, open, paid, paidoff, voided, overdue, unchecked (comma-separated; overdue only on its own)"] = None,
     page: Annotated[int, "Page number (0-indexed)"] = 0,
 ) -> VoucherList:
     """[finance] List purchase invoices and expenses."""
@@ -1226,7 +1258,8 @@ async def create_draft_quotation(
     recipient_name: Annotated[str, "Company or person name"],
     line_items: Annotated[
         list[dict[str, Any]],
-        "Line items. Each: {name, unit_price, quantity?, unit_name?, description?, tax_rate?}",
+        "Line items. Each: {name, unit_price, quantity?, unit_name?, description?, tax_rate?}. "
+        "unit_price is net, or gross when the account's tax type is gross.",
     ],
     contact_id: Annotated[str | None, "UUID of an existing Lexoffice contact (links quotation to contact record)"] = None,
     street: Annotated[str | None, "Recipient street address"] = None,
@@ -1235,7 +1268,7 @@ async def create_draft_quotation(
     country_code: Annotated[str, "ISO country code"] = "DE",
     currency: Annotated[str, "Currency code"] = "EUR",
     expiration_date: Annotated[str | None, "Quotation expiry date (ISO format)"] = None,
-    title: Annotated[str, "Quotation title"] = "Angebot",
+    title: Annotated[str, "Quotation title (max 25 characters, a Lexoffice limit)"] = "Angebot",
     introduction: Annotated[str | None, "Introduction text"] = None,
     remark: Annotated[str | None, "Closing remark"] = None,
     tax_rate: Annotated[int | None, "Override tax rate percentage for all line items"] = None,
@@ -1255,7 +1288,9 @@ async def create_draft_quotation(
     data: dict[str, Any] = {
         "voucherDate": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000+00:00"),
         "address": address,
-        "lineItems": _build_line_items(line_items, default_tax_rate=effective_rate),
+        "lineItems": _build_line_items(
+            line_items, default_tax_rate=effective_rate, tax_type=tax_config["tax_type"]
+        ),
         "totalPrice": {"currency": currency},
         "taxConditions": {"taxType": tax_config["tax_type"]},
         "shippingConditions": {"shippingType": "none"},
@@ -1484,7 +1519,7 @@ async def list_vouchers(
         ],
         "Voucher type to list",
     ],
-    status: Annotated[str | None, "Filter: draft, open, paid, paidoff, voided, overdue (comma-separated)"] = None,
+    status: Annotated[str | None, "Filter: draft, open, paid, paidoff, voided, overdue (comma-separated; overdue only on its own)"] = None,
     page: Annotated[int, "Page number (0-indexed)"] = 0,
 ) -> VoucherList:
     """[finance] List vouchers of a given type with optional status filter.
@@ -1603,7 +1638,7 @@ async def create_voucher(
     voucher_number: Annotated[str | None, "Vendor's invoice/reference number"] = None,
     due_date: Annotated[str | None, "Payment due date in yyyy-MM-dd format"] = None,
     remark: Annotated[str | None, "Free-text remark (full-text searchable in Lexoffice)"] = None,
-    file_content: Annotated[str | None, "Optional base64-encoded receipt file (PDF/PNG/JPG) to attach to the voucher in the same call."] = None,
+    file_content: Annotated[str | None, "Optional base64-encoded receipt file (PDF/PNG/JPG, max 5MB) to attach to the voucher in the same call."] = None,
     file_name: Annotated[str | None, "File name for file_content (e.g. 'invoice.pdf'). Required if file_content is given."] = None,
 ) -> CreateVoucherResult:
     """[finance] Create a structured purchase voucher (Beleg) with the amount, tax, and vendor pre-filled.
@@ -1962,7 +1997,7 @@ async def get_contact_invoices(
     ctx: Context,
     contact_name: Annotated[str | None, "Contact name to search for"] = None,
     contact_id: Annotated[str | None, "UUID of the contact (preferred over name)"] = None,
-    status: Annotated[str | None, "Filter: draft, open, paid, paidoff, voided, overdue (comma-separated)"] = None,
+    status: Annotated[str | None, "Filter: draft, open, paid, paidoff, voided, overdue (comma-separated; overdue only on its own)"] = None,
 ) -> VoucherList:
     """[finance] List all invoices for a specific contact. Search by name or provide a contact ID directly.
 
@@ -2025,7 +2060,8 @@ async def create_credit_note(
     recipient_name: Annotated[str, "Company or person name"],
     line_items: Annotated[
         list[dict[str, Any]],
-        "Line items. Each: {name, unit_price, quantity?, unit_name?, description?, tax_rate?}",
+        "Line items. Each: {name, unit_price, quantity?, unit_name?, description?, tax_rate?}. "
+        "unit_price is net, or gross when the account's tax type is gross.",
     ],
     preceding_invoice_id: Annotated[str | None, "UUID of the original invoice this corrects"] = None,
     contact_id: Annotated[str | None, "UUID of an existing Lexoffice contact"] = None,
@@ -2033,7 +2069,7 @@ async def create_credit_note(
     zip_code: Annotated[str | None, "Recipient postal code"] = None,
     city: Annotated[str | None, "Recipient city"] = None,
     country_code: Annotated[str, "ISO country code"] = "DE",
-    title: Annotated[str, "Credit note title"] = "Gutschrift",
+    title: Annotated[str, "Credit note title (max 25 characters, a Lexoffice limit)"] = "Gutschrift",
     introduction: Annotated[str | None, "Introduction text"] = None,
     remark: Annotated[str | None, "Closing remark"] = None,
     finalize: Annotated[bool, "Finalize immediately (assigns number, cannot be undone)"] = False,
@@ -2046,7 +2082,9 @@ async def create_credit_note(
     data: dict[str, Any] = {
         "voucherDate": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000+00:00"),
         "address": address,
-        "lineItems": _build_line_items(line_items, default_tax_rate=tax_config["default_rate"]),
+        "lineItems": _build_line_items(
+            line_items, default_tax_rate=tax_config["default_rate"], tax_type=tax_config["tax_type"]
+        ),
         "totalPrice": {"currency": "EUR"},
         "taxConditions": {"taxType": tax_config["tax_type"]},
         "title": title,

@@ -45,6 +45,19 @@ def _is_taxrate_rejection(exc: httpx.HTTPStatusError) -> bool:
     return any(isinstance(i, dict) and i.get("source") == "taxRatePercent" for i in issues)
 
 
+def _http_error_summary(exc: httpx.HTTPError) -> str:
+    """One line for a failed Lexoffice call: ``HTTP 404: <Lexoffice's message>`` for a
+    status error, ``ReadTimeout: ...`` and the like for a transport error."""
+    if not isinstance(exc, httpx.HTTPStatusError):
+        return f"{type(exc).__name__}: {exc}"
+    resp = exc.response
+    try:
+        body = resp.json()
+    except ValueError:
+        body = None
+    msg = (body.get("message") or body.get("error")) if isinstance(body, dict) else None
+    return f"HTTP {resp.status_code}: {msg or resp.text[:300] or resp.reason_phrase}"
+
 def _deep_link(resource_id: str, *, edit: bool = False) -> str:
     mode = "edit" if edit else "view"
     return f"{LEXOFFICE_UI}/#/voucher/{mode}/{resource_id}"
@@ -1063,7 +1076,10 @@ async def get_payment_status(
     contact_name. A typed return can't represent "object XOR array" without changing one
     branch's wire shape (e.g. wrapping the object in a list), so this stays str for
     backward-compat. The missing-arg case now raises ToolError instead of returning an error
-    envelope, unifying error signalling with the rest of the server."""
+    envelope, unifying error signalling with the rest of the server.
+
+    By contact_name, a row whose payments lookup failed has ``payment: null`` and
+    ``payment_error`` (e.g. ``"HTTP 404: ..."``); if every lookup fails, it raises ToolError."""
     if invoice_id:
         result = await _client(ctx).get_payments(invoice_id)
         return _fmt(result)
@@ -1075,6 +1091,7 @@ async def get_payment_status(
             if contact_name.lower() in v.get("contactName", "").lower()
         ]
         results = []
+        errors = []
         for v in matches:
             vid = v.get("voucherId")
             if not vid:
@@ -1085,11 +1102,15 @@ async def get_payment_status(
                     f"{v.get('contactName')!r} came back from the voucherlist without an id; "
                     "cannot look up its payments."
                 )
+            error = None
             try:
                 payment = await _client(ctx).get_payments(vid)
-            except Exception:
-                payment = {"status": "unknown"}
-            results.append({
+            except httpx.HTTPError as exc:
+                # Report the failed lookup on its row, never a made-up status (CDI-2083).
+                payment = None
+                error = _http_error_summary(exc)
+                errors.append(error)
+            row = {
                 "voucherId": vid,
                 "voucherNumber": v.get("voucherNumber"),
                 "contactName": v.get("contactName"),
@@ -1097,7 +1118,15 @@ async def get_payment_status(
                 "dueDate": v.get("dueDate"),
                 "payment": payment,
                 "deepLink": _deep_link(vid),
-            })
+            }
+            if error:
+                row["payment_error"] = error
+            results.append(row)
+        if matches and len(errors) == len(matches):
+            raise ToolError(
+                f"Payment lookup failed for all {len(matches)} open invoice(s) matching "
+                f"{contact_name!r}: {'; '.join(sorted(set(errors)))}"
+            )
         return _fmt(results)
 
     raise ToolError("Provide either invoice_id or contact_name")

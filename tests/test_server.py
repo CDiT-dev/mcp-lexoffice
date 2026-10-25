@@ -1375,25 +1375,6 @@ async def test_get_payment_status_by_contact_no_matches():
     assert parsed == []
 
 
-async def test_get_payment_status_by_contact_payment_error():
-    """If get_payments raises, should fall back to status: unknown."""
-    from mcp_lexoffice.server import get_payment_status
-
-    mock_client = AsyncMock()
-    mock_client.filter_vouchers.return_value = {
-        "content": [
-            {"voucherId": "v1", "contactName": "Acme GmbH", "totalAmount": 100},
-        ]
-    }
-    mock_client.get_payments.side_effect = Exception("API error")
-    ctx = FakeContext(mock_client)
-
-    result = await get_payment_status(ctx, contact_name="Acme")
-    parsed = as_dict(result)
-    assert len(parsed) == 1
-    assert parsed[0]["payment"]["status"] == "unknown"
-
-
 # ── Voucherlist row id, end to end through the real client (CDI-2081) ──
 
 # Key set recorded from a live GET /voucherlist row on 2026-10-24 (matches the documented
@@ -1464,6 +1445,50 @@ async def test_get_payment_status_by_contact_missing_id_is_a_tool_error(client, 
     with pytest.raises(ToolError, match="RE0042"):
         await get_payment_status(FakeContext(client), contact_name="acme")
     assert not payments.called
+
+
+# ── get_payment_status: failed payments lookups are reported, not "unknown" (CDI-2083) ──
+
+_ROW_404 = {**VOUCHERLIST_ROW, "id": "78a86a17-0000-4000-8000-000000000404", "voucherNumber": "RE0404"}
+_ROW_500 = {**VOUCHERLIST_ROW, "id": "78a86a17-0000-4000-8000-000000000500", "voucherNumber": "RE0500"}
+_BODY_404 = {"status": 404, "error": "Not Found", "message": "Payments for this voucher not found"}
+_BODY_500 = {"status": 500, "error": "Internal Server Error"}
+
+
+async def test_get_payment_status_by_contact_reports_failed_lookup_per_row(client, mock_api):
+    from mcp_lexoffice.server import get_payment_status
+
+    ok_id = VOUCHERLIST_ROW["id"]
+    mock_api.get("/voucherlist").respond(
+        200, json=_voucherlist_page(dict(VOUCHERLIST_ROW), dict(_ROW_404))
+    )
+    mock_api.get(f"/payments/{ok_id}").respond(200, json={"openAmount": 600})
+    mock_api.get(f"/payments/{_ROW_404['id']}").respond(404, json=_BODY_404)
+
+    ok, failed = as_dict(await get_payment_status(FakeContext(client), contact_name="acme"))
+    # The success row keeps its exact shape: no new key on the success path.
+    assert list(ok) == [
+        "voucherId", "voucherNumber", "contactName", "totalAmount", "dueDate", "payment", "deepLink",
+    ]
+    assert ok["payment"] == {"openAmount": 600}
+    assert failed["voucherId"] == _ROW_404["id"]
+    assert failed["payment"] is None
+    assert failed["payment_error"] == "HTTP 404: Payments for this voucher not found"
+
+
+async def test_get_payment_status_by_contact_all_lookups_failed_is_a_tool_error(client, mock_api):
+    from mcp_lexoffice.server import get_payment_status
+
+    mock_api.get("/voucherlist").respond(200, json=_voucherlist_page(dict(_ROW_404), dict(_ROW_500)))
+    mock_api.get(f"/payments/{_ROW_404['id']}").respond(404, json=_BODY_404)
+    mock_api.get(f"/payments/{_ROW_500['id']}").respond(500, json=_BODY_500)
+
+    with pytest.raises(ToolError) as exc_info:
+        await get_payment_status(FakeContext(client), contact_name="acme")
+    msg = str(exc_info.value)
+    assert "all 2 open invoice(s)" in msg
+    assert "HTTP 404: Payments for this voucher not found" in msg
+    assert "HTTP 500: Internal Server Error" in msg
 
 
 # ── Contact tools ────────────────────────────────────────────────────

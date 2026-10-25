@@ -10,7 +10,6 @@ from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
-
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel
 
@@ -2221,7 +2220,7 @@ async def test_create_draft_invoice_net_tax():
     from mcp_lexoffice.server import create_draft_invoice
 
     ctx = make_ctx({"create_invoice": {"id": "inv-net"}}, tax_type="net")
-    result = await create_draft_invoice(
+    await create_draft_invoice(
         ctx,
         recipient_name="Net GmbH",
         line_items=[{"name": "Consulting", "unit_price": 150}],
@@ -2236,7 +2235,7 @@ async def test_create_draft_invoice_tax_rate_override():
     from mcp_lexoffice.server import create_draft_invoice
 
     ctx = make_ctx({"create_invoice": {"id": "inv-override"}}, tax_type="net")
-    result = await create_draft_invoice(
+    await create_draft_invoice(
         ctx,
         recipient_name="Books GmbH",
         line_items=[{"name": "Books", "unit_price": 50}],
@@ -2252,7 +2251,7 @@ async def test_create_draft_invoice_gross_tax():
     from mcp_lexoffice.server import create_draft_invoice
 
     ctx = make_ctx({"create_invoice": {"id": "inv-gross"}}, tax_type="gross")
-    result = await create_draft_invoice(
+    await create_draft_invoice(
         ctx,
         recipient_name="Gross GmbH",
         line_items=[{"name": "Service", "unit_price": 200}],
@@ -2267,7 +2266,7 @@ async def test_create_draft_quotation_net_tax():
     from mcp_lexoffice.server import create_draft_quotation
 
     ctx = make_ctx({"create_quotation": {"id": "q-net"}}, tax_type="net")
-    result = await create_draft_quotation(
+    await create_draft_quotation(
         ctx,
         recipient_name="Net GmbH",
         line_items=[{"name": "Consulting", "unit_price": 150}],
@@ -2282,7 +2281,7 @@ async def test_create_article_net_tax():
     from mcp_lexoffice.server import create_article
 
     ctx = make_ctx({"create_article": {"id": "art-net"}}, tax_type="net")
-    result = await create_article(ctx, name="Consulting", net_price=150)
+    await create_article(ctx, name="Consulting", net_price=150)
     call_data = ctx.lifespan_context["lexoffice"].create_article.call_args[0][0]
     assert call_data["price"]["taxRatePercentage"] == 19
 
@@ -2292,7 +2291,7 @@ async def test_create_article_tax_rate_override():
     from mcp_lexoffice.server import create_article
 
     ctx = make_ctx({"create_article": {"id": "art-7"}}, tax_type="net")
-    result = await create_article(ctx, name="Books", net_price=50, tax_rate=7)
+    await create_article(ctx, name="Books", net_price=50, tax_rate=7)
     call_data = ctx.lifespan_context["lexoffice"].create_article.call_args[0][0]
     assert call_data["price"]["taxRatePercentage"] == 7
 
@@ -2460,9 +2459,11 @@ async def test_array_tool_text_content_backward_compatible(tool_name, method, pa
     their unstructured TEXT content an equivalent JSON ARRAY (rule 2) and add structured_content
     purely additively. Compares against the exact ``json.dumps`` text the tool produced before."""
     from unittest.mock import AsyncMock
+
+    from fastmcp import Client
+
     import mcp_lexoffice.server as srv
     from mcp_lexoffice.config import get_settings
-    from fastmcp import Client
 
     fake = AsyncMock()
     getattr(fake, method).return_value = [dict(x) for x in payload]
@@ -2729,8 +2730,8 @@ async def test_financial_overview_paginates_all_pages_no_silent_loss():
 async def test_financial_overview_truncates_at_page_ceiling():
     """An account that never reports its last page is capped (truncated=True), never looped
     forever and never silently partial."""
-    from mcp_lexoffice.server import get_financial_overview
     import mcp_lexoffice.server as server_mod
+    from mcp_lexoffice.server import get_financial_overview
 
     # Every page claims there is more (last=False) — the hard ceiling must stop us.
     never_last = {
@@ -2751,7 +2752,7 @@ async def test_financial_overview_truncates_at_page_ceiling():
 async def test_financial_overview_full_page_without_envelope_flags_truncated():
     """Legacy/mocked responses with no paging envelope: a brimful page can't be proven
     complete, so we flag truncated rather than silently dropping rows (back-compat path)."""
-    from mcp_lexoffice.server import get_financial_overview, _FINANCIAL_PAGE_SIZE
+    from mcp_lexoffice.server import _FINANCIAL_PAGE_SIZE, get_financial_overview
 
     full_page = {"content": [{"voucherDate": "2026-01-10", "totalAmount": 1}
                              for _ in range(_FINANCIAL_PAGE_SIZE)]}

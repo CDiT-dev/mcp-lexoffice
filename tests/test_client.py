@@ -10,11 +10,10 @@ from unittest.mock import patch
 
 import httpx
 import pytest
-import respx
 from fastmcp.exceptions import ToolError
 
 from mcp_lexoffice import client as client_mod
-from mcp_lexoffice.client import LexofficeClient, BASE_URL
+from mcp_lexoffice.client import BASE_URL, LexofficeClient
 from mcp_lexoffice.config import get_settings
 
 
@@ -370,7 +369,7 @@ async def test_create_voucher(client, mock_api):
 
 
 async def test_attach_voucher_file(client, mock_api):
-    route = mock_api.post("/vouchers/v-001/files").respond(
+    mock_api.post("/vouchers/v-001/files").respond(
         200, json={"id": "file-1", "voucherId": "v-001"}
     )
     result = await client.attach_voucher_file("v-001", b"%PDF-1.4 data", "invoice.pdf")

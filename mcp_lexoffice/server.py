@@ -5,17 +5,19 @@ import json
 import logging
 import os
 from contextlib import asynccontextmanager
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from typing import Annotated, Any, Literal
 
 import fastmcp.server.http as _fastmcp_http
 import httpx
-from fastmcp import FastMCP, Context
+from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from mcp.types import Icon, ToolAnnotations
 from pydantic import BaseModel, ConfigDict, Field, model_serializer
 
+from .auth import BearerTokenVerifier
 from .client import LexofficeClient
+from .config import get_settings
 from .usage import UsageMiddleware
 
 logger = logging.getLogger(__name__)
@@ -58,9 +60,6 @@ async def lifespan(mcp: FastMCP):
     client = LexofficeClient()
     yield {"lexoffice": client}
 
-
-from .auth import BearerTokenVerifier
-from .config import get_settings
 
 _settings = get_settings()
 _api_key = _settings.mcp_api_key.get_secret_value()
@@ -703,7 +702,7 @@ async def create_draft_invoice(
     effective_rate = tax_rate if tax_rate is not None else tax_config["default_rate"]
     address = {"contactId": contact_id} if contact_id else _build_address(recipient_name, street, zip_code, city, country_code)
     data: dict[str, Any] = {
-        "voucherDate": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000+00:00"),
+        "voucherDate": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.000+00:00"),
         "address": address,
         "lineItems": _build_line_items(
             line_items, default_tax_rate=effective_rate, tax_type=tax_config["tax_type"]
@@ -1294,7 +1293,7 @@ async def create_draft_quotation(
     effective_rate = tax_rate if tax_rate is not None else tax_config["default_rate"]
     address = {"contactId": contact_id} if contact_id else _build_address(recipient_name, street, zip_code, city, country_code)
     data: dict[str, Any] = {
-        "voucherDate": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000+00:00"),
+        "voucherDate": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.000+00:00"),
         "address": address,
         "lineItems": _build_line_items(
             line_items, default_tax_rate=effective_rate, tax_type=tax_config["tax_type"]
@@ -2088,7 +2087,7 @@ async def create_credit_note(
     tax_config = await _get_tax_config(ctx)
     address = {"contactId": contact_id} if contact_id else _build_address(recipient_name, street, zip_code, city, country_code)
     data: dict[str, Any] = {
-        "voucherDate": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000+00:00"),
+        "voucherDate": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.000+00:00"),
         "address": address,
         "lineItems": _build_line_items(
             line_items, default_tax_rate=tax_config["default_rate"], tax_type=tax_config["tax_type"]
@@ -2110,9 +2109,7 @@ async def create_credit_note(
     return CreditNote.model_validate(result)
 
 
-from datetime import timezone as _tz  # noqa: E402
-
-_start_time = datetime.now(_tz.utc)
+_start_time = datetime.now(UTC)
 try:
     from mcp_lexoffice import __version__ as _version
 except ImportError:
@@ -2202,7 +2199,7 @@ def status_resource() -> str:
     return _fmt({
         "service": "mcp-lexoffice",
         "version": _version,
-        "uptime_seconds": int((datetime.now(_tz.utc) - _start_time).total_seconds()),
+        "uptime_seconds": int((datetime.now(UTC) - _start_time).total_seconds()),
     })
 
 
@@ -2311,7 +2308,7 @@ async def _health(request: _SReq) -> _SResp:
         "service": "mcp-lexoffice",
         "version": _version,
         "upstream_reachable": True,
-        "uptime_seconds": int((datetime.now(_tz.utc) - _start_time).total_seconds()),
+        "uptime_seconds": int((datetime.now(UTC) - _start_time).total_seconds()),
     })
 
 

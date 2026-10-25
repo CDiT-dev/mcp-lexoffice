@@ -1,7 +1,8 @@
 """mcp-lexoffice."""
 
 import os
-from importlib.metadata import PackageNotFoundError, version as _pkg_version
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _pkg_version
 
 try:
     # Releases are git tags; the image carries the tag as APP_VERSION.

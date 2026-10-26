@@ -28,6 +28,25 @@ packages = ["mcp_lexoffice"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 
+[tool.ruff]
+# usage.py is vendored unchanged from CDiT-infrastructure; lint it there, not here.
+extend-exclude = ["mcp_lexoffice/usage.py"]
+
+[tool.ruff.lint]
+# Pinned explicitly rather than inheriting ruff's defaults, which widen between
+# releases (CDI-1783). Same set as the rest of the MCP fleet. BLE001 stays
+# unselected on purpose: the defensive `except Exception` catches are wanted.
+select = ["E4", "E7", "E9", "F", "I", "UP", "B", "RUF"]
+ignore = [
+    # UP042 wants StrEnum, which changes str() of an enum value from "Cls.member"
+    # to "member". Such values can be persisted or on the wire, so that is a data
+    # format decision; the fleet decision is no.
+    "UP042",
+]
+# server.py marks its deliberate defensive catches `noqa: BLE001`; declaring the
+# rule external keeps RUF100 from deleting those markers while it stays unselected.
+external = ["BLE001"]
+
 [dependency-groups]
 dev = [
     "pytest>=8.0",

@@ -10,7 +10,6 @@ from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
-
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel
 
@@ -1376,25 +1375,6 @@ async def test_get_payment_status_by_contact_no_matches():
     assert parsed == []
 
 
-async def test_get_payment_status_by_contact_payment_error():
-    """If get_payments raises, should fall back to status: unknown."""
-    from mcp_lexoffice.server import get_payment_status
-
-    mock_client = AsyncMock()
-    mock_client.filter_vouchers.return_value = {
-        "content": [
-            {"voucherId": "v1", "contactName": "Acme GmbH", "totalAmount": 100},
-        ]
-    }
-    mock_client.get_payments.side_effect = Exception("API error")
-    ctx = FakeContext(mock_client)
-
-    result = await get_payment_status(ctx, contact_name="Acme")
-    parsed = as_dict(result)
-    assert len(parsed) == 1
-    assert parsed[0]["payment"]["status"] == "unknown"
-
-
 # ── Voucherlist row id, end to end through the real client (CDI-2081) ──
 
 # Key set recorded from a live GET /voucherlist row on 2026-10-24 (matches the documented
@@ -1465,6 +1445,50 @@ async def test_get_payment_status_by_contact_missing_id_is_a_tool_error(client, 
     with pytest.raises(ToolError, match="RE0042"):
         await get_payment_status(FakeContext(client), contact_name="acme")
     assert not payments.called
+
+
+# ── get_payment_status: failed payments lookups are reported, not "unknown" (CDI-2083) ──
+
+_ROW_404 = {**VOUCHERLIST_ROW, "id": "78a86a17-0000-4000-8000-000000000404", "voucherNumber": "RE0404"}
+_ROW_500 = {**VOUCHERLIST_ROW, "id": "78a86a17-0000-4000-8000-000000000500", "voucherNumber": "RE0500"}
+_BODY_404 = {"status": 404, "error": "Not Found", "message": "Payments for this voucher not found"}
+_BODY_500 = {"status": 500, "error": "Internal Server Error"}
+
+
+async def test_get_payment_status_by_contact_reports_failed_lookup_per_row(client, mock_api):
+    from mcp_lexoffice.server import get_payment_status
+
+    ok_id = VOUCHERLIST_ROW["id"]
+    mock_api.get("/voucherlist").respond(
+        200, json=_voucherlist_page(dict(VOUCHERLIST_ROW), dict(_ROW_404))
+    )
+    mock_api.get(f"/payments/{ok_id}").respond(200, json={"openAmount": 600})
+    mock_api.get(f"/payments/{_ROW_404['id']}").respond(404, json=_BODY_404)
+
+    ok, failed = as_dict(await get_payment_status(FakeContext(client), contact_name="acme"))
+    # The success row keeps its exact shape: no new key on the success path.
+    assert list(ok) == [
+        "voucherId", "voucherNumber", "contactName", "totalAmount", "dueDate", "payment", "deepLink",
+    ]
+    assert ok["payment"] == {"openAmount": 600}
+    assert failed["voucherId"] == _ROW_404["id"]
+    assert failed["payment"] is None
+    assert failed["payment_error"] == "HTTP 404: Payments for this voucher not found"
+
+
+async def test_get_payment_status_by_contact_all_lookups_failed_is_a_tool_error(client, mock_api):
+    from mcp_lexoffice.server import get_payment_status
+
+    mock_api.get("/voucherlist").respond(200, json=_voucherlist_page(dict(_ROW_404), dict(_ROW_500)))
+    mock_api.get(f"/payments/{_ROW_404['id']}").respond(404, json=_BODY_404)
+    mock_api.get(f"/payments/{_ROW_500['id']}").respond(500, json=_BODY_500)
+
+    with pytest.raises(ToolError) as exc_info:
+        await get_payment_status(FakeContext(client), contact_name="acme")
+    msg = str(exc_info.value)
+    assert "all 2 open invoice(s)" in msg
+    assert "HTTP 404: Payments for this voucher not found" in msg
+    assert "HTTP 500: Internal Server Error" in msg
 
 
 # ── Contact tools ────────────────────────────────────────────────────
@@ -2221,7 +2245,7 @@ async def test_create_draft_invoice_net_tax():
     from mcp_lexoffice.server import create_draft_invoice
 
     ctx = make_ctx({"create_invoice": {"id": "inv-net"}}, tax_type="net")
-    result = await create_draft_invoice(
+    await create_draft_invoice(
         ctx,
         recipient_name="Net GmbH",
         line_items=[{"name": "Consulting", "unit_price": 150}],
@@ -2236,7 +2260,7 @@ async def test_create_draft_invoice_tax_rate_override():
     from mcp_lexoffice.server import create_draft_invoice
 
     ctx = make_ctx({"create_invoice": {"id": "inv-override"}}, tax_type="net")
-    result = await create_draft_invoice(
+    await create_draft_invoice(
         ctx,
         recipient_name="Books GmbH",
         line_items=[{"name": "Books", "unit_price": 50}],
@@ -2252,7 +2276,7 @@ async def test_create_draft_invoice_gross_tax():
     from mcp_lexoffice.server import create_draft_invoice
 
     ctx = make_ctx({"create_invoice": {"id": "inv-gross"}}, tax_type="gross")
-    result = await create_draft_invoice(
+    await create_draft_invoice(
         ctx,
         recipient_name="Gross GmbH",
         line_items=[{"name": "Service", "unit_price": 200}],
@@ -2267,7 +2291,7 @@ async def test_create_draft_quotation_net_tax():
     from mcp_lexoffice.server import create_draft_quotation
 
     ctx = make_ctx({"create_quotation": {"id": "q-net"}}, tax_type="net")
-    result = await create_draft_quotation(
+    await create_draft_quotation(
         ctx,
         recipient_name="Net GmbH",
         line_items=[{"name": "Consulting", "unit_price": 150}],
@@ -2282,7 +2306,7 @@ async def test_create_article_net_tax():
     from mcp_lexoffice.server import create_article
 
     ctx = make_ctx({"create_article": {"id": "art-net"}}, tax_type="net")
-    result = await create_article(ctx, name="Consulting", net_price=150)
+    await create_article(ctx, name="Consulting", net_price=150)
     call_data = ctx.lifespan_context["lexoffice"].create_article.call_args[0][0]
     assert call_data["price"]["taxRatePercentage"] == 19
 
@@ -2292,7 +2316,7 @@ async def test_create_article_tax_rate_override():
     from mcp_lexoffice.server import create_article
 
     ctx = make_ctx({"create_article": {"id": "art-7"}}, tax_type="net")
-    result = await create_article(ctx, name="Books", net_price=50, tax_rate=7)
+    await create_article(ctx, name="Books", net_price=50, tax_rate=7)
     call_data = ctx.lifespan_context["lexoffice"].create_article.call_args[0][0]
     assert call_data["price"]["taxRatePercentage"] == 7
 
@@ -2460,9 +2484,11 @@ async def test_array_tool_text_content_backward_compatible(tool_name, method, pa
     their unstructured TEXT content an equivalent JSON ARRAY (rule 2) and add structured_content
     purely additively. Compares against the exact ``json.dumps`` text the tool produced before."""
     from unittest.mock import AsyncMock
+
+    from fastmcp import Client
+
     import mcp_lexoffice.server as srv
     from mcp_lexoffice.config import get_settings
-    from fastmcp import Client
 
     fake = AsyncMock()
     getattr(fake, method).return_value = [dict(x) for x in payload]
@@ -2729,8 +2755,8 @@ async def test_financial_overview_paginates_all_pages_no_silent_loss():
 async def test_financial_overview_truncates_at_page_ceiling():
     """An account that never reports its last page is capped (truncated=True), never looped
     forever and never silently partial."""
-    from mcp_lexoffice.server import get_financial_overview
     import mcp_lexoffice.server as server_mod
+    from mcp_lexoffice.server import get_financial_overview
 
     # Every page claims there is more (last=False) — the hard ceiling must stop us.
     never_last = {
@@ -2751,7 +2777,7 @@ async def test_financial_overview_truncates_at_page_ceiling():
 async def test_financial_overview_full_page_without_envelope_flags_truncated():
     """Legacy/mocked responses with no paging envelope: a brimful page can't be proven
     complete, so we flag truncated rather than silently dropping rows (back-compat path)."""
-    from mcp_lexoffice.server import get_financial_overview, _FINANCIAL_PAGE_SIZE
+    from mcp_lexoffice.server import _FINANCIAL_PAGE_SIZE, get_financial_overview
 
     full_page = {"content": [{"voucherDate": "2026-01-10", "totalAmount": 1}
                              for _ in range(_FINANCIAL_PAGE_SIZE)]}

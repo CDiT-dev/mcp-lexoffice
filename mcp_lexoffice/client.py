@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import time
 from typing import Any
 
@@ -96,10 +95,9 @@ class LexofficeClient:
             # The bucket is per token, so hold back every caller, not just this retry.
             self._next_slot = max(self._next_slot, time.monotonic() + _retry_wait(resp, attempt))
         if resp.status_code >= 400:
-            try:
-                error_body = json.dumps(resp.json(), indent=2, ensure_ascii=False, default=str)
-            except Exception:
-                error_body = resp.text
+            # The raw body. A json.dumps pretty-print used to sit here, but the `json`
+            # parameter shadows the module, so it always raised and fell back to this.
+            error_body = resp.text
             try:
                 resp.raise_for_status()
             except httpx.HTTPStatusError as e:

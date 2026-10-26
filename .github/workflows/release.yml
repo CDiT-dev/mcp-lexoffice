@@ -23,7 +23,7 @@ jobs:
           fetch-depth: 0
           # GITHUB_TOKEN, not a PAT: a tag it pushes triggers no other workflow (no cascade).
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
 

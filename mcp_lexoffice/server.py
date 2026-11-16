@@ -105,8 +105,9 @@ SERVER_INSTRUCTIONS = (
     "- Money owed: get_payment_status, get_contact_invoices, create_dunning (Mahnung) for "
     "overdue invoices.\n\n"
     "Irreversible actions (create_draft_invoice / create_draft_quotation with finalize=true, "
-    "create_credit_note with finalize=true, create_dunning, delete_draft_invoice) assign "
-    "numbers or delete data and cannot be undone — confirm intent before calling. Reference data is also exposed as "
+    "create_credit_note with finalize=true, create_dunning) assign numbers and cannot be "
+    "undone — confirm intent before calling. The Lexware API cannot delete invoices, drafts "
+    "included: delete a draft in the Lexware Office web app. Reference data is also exposed as "
     "resources under the lexoffice:// scheme (countries, posting-categories, payment-conditions, "
     "service-catalog, status).\n\n"
     "See lexoffice://service-catalog for the service catalog and rates."
@@ -519,12 +520,6 @@ class FileRef(LexofficeBase):
     voucherId: str | None = None
 
 
-class DeleteResult(LexofficeBase):
-    """Status envelope for delete_draft_invoice ({status, invoice_id} or error)."""
-
-    status: str | None = None
-    invoice_id: str | None = None
-
 
 DEFAULT_TAX_RATE = {"vatfree": 0, "net": 19, "gross": 19}
 
@@ -739,33 +734,6 @@ async def create_draft_invoice(
     invoice_id = result.get("id", "")
     result["deepLink"] = _deep_link(invoice_id, edit=not finalize)
     return Invoice.model_validate(result)
-
-
-@mcp.tool(
-    tags={"finance", "invoice", "delete", "write", "irreversible"},
-    annotations=ToolAnnotations(
-        title="Delete draft invoice",
-        read_only_hint=False,
-        destructive_hint=True,
-        idempotent_hint=True,
-        open_world_hint=True,
-    ),
-)
-async def delete_draft_invoice(
-    ctx: Context,
-    invoice_id: Annotated[str, "UUID of the draft invoice to delete"],
-) -> DeleteResult:
-    """[finance] Delete a draft invoice. Only works on drafts — finalized invoices cannot be deleted."""
-    invoice = await _client(ctx).get_invoice(invoice_id)
-    status = invoice.get("voucherStatus", "")
-    if status != "draft":
-        raise ToolError(
-            f"Cannot delete invoice with status '{status}'. Only drafts can be deleted. "
-            f"Review it at {_deep_link(invoice_id)}"
-        )
-
-    await _client(ctx).delete_invoice(invoice_id)
-    return DeleteResult.model_validate({"status": "deleted", "invoice_id": invoice_id})
 
 
 @mcp.tool(

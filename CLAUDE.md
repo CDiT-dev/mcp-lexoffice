@@ -34,8 +34,8 @@ MCP_TRANSPORT=stdio uv run mcp-lexoffice
 - Per-item `tax_rate` override available on invoices, quotations, and articles
 - Default payment terms: "Zahlbar sofort, rein netto"
 
-## Tools (36 total)
-- **Invoices**: create_draft_invoice (finalize=true to finalize on create), get_invoice, get_invoice_pdf, list_invoices, delete_draft_invoice
+## Tools (35 total)
+- **Invoices**: create_draft_invoice (finalize=true to finalize on create), get_invoice, get_invoice_pdf, list_invoices (no delete: the public API has no `DELETE /invoices`; drafts are deleted in the web UI, COS-181)
 - **Financial**: list_expenses, get_financial_overview, get_payment_status
 - **Contacts**: search_contacts, get_contact, create_contact, update_contact, find_or_create_contact, get_contact_invoices
 - **Quotations**: create_draft_quotation (finalize=true), pursue_quotation_to_invoice, list_quotations
@@ -46,17 +46,17 @@ MCP_TRANSPORT=stdio uv run mcp-lexoffice
 - **Vouchers**: upload_voucher (raw file → Beleg-Eingang), create_voucher (structured purchaseinvoice w/ amount+vendor, optional PDF attach + read-back), attach_voucher_file, get_voucher, update_voucher, list_vouchers, list_posting_categories
 - **Other**: get_profile, list_payment_conditions, list_countries
 
-All 36 tools carry MCP annotations (`readOnlyHint` on reads, `destructiveHint` on
-finalize-capable creates/delete, `idempotentHint`, `openWorldHint`, human `title`) and first-class
+All 35 tools carry MCP annotations (`readOnlyHint` on reads, `destructiveHint` on
+finalize-capable creates, `idempotentHint`, `openWorldHint`, human `title`) and first-class
 `tags` (e.g. `finance`, `invoice`, `irreversible`, `belegfaenger`).
 
 ### Typed output schemas
-31 of the 36 tools return typed Pydantic models, so fastmcp advertises a per-tool
+34 of the 35 tools return typed Pydantic models, so fastmcp advertises a per-tool
 `output_schema` and emits machine-validated structured content alongside the human-readable
 JSON. Reusable domain models live in `server.py`: `Profile`, `Invoice`, `VoucherList`
 (+`VoucherListEntry`), `Contact`/`ContactList`, `Quotation`, `Article`/`ArticleList`,
 `Voucher`, `CreateVoucherResult`, `CreditNote`, `Dunning`, `RecurringTemplate`, `DocumentRef`,
-`FileRef`, `DeleteResult`, plus the pass-1
+`FileRef`, plus the pass-1
 `FinancialOverview`. Each is reused across sibling get/list/create tools.
 
 **Backward-compat contract** (a manually-synced Cloudflare portal + live clients depend on it):
@@ -67,10 +67,10 @@ object graph (and conditionally-injected keys like `daysOverdue` / `_note` / `_e
 `_action`) verbatim, and every model validates BOTH the success and the `{"error": ...}`
 short-circuit payload — so the structured schema never explodes on the error path.
 
-The 5 tools still returning a raw JSON string do so deliberately: `list_countries`,
-`list_posting_categories`, `list_payment_conditions`, `list_recurring_templates` return bare
-JSON arrays (a typed `list[Model]` return makes fastmcp wrap them under a `result` key, which
-would change the wire shape), and `get_payment_status` is polymorphic (dict | list | error).
+`list_countries`, `list_posting_categories`, `list_payment_conditions` and
+`list_recurring_templates` return `list[LexofficeListItem]`: the text content stays the bare
+JSON array, the structured content sits under fastmcp's `result` key. Only `get_payment_status`
+returns a raw JSON string, because it is polymorphic (dict | list | error).
 
 `get_financial_overview` additionally sets a `truncated` flag when an underlying voucher page
 hits the 250-row cap.

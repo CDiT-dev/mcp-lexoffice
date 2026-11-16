@@ -1,6 +1,6 @@
 # mcp-lexoffice
 
-An MCP server for **Lexware Office**, the German accounting service formerly called **Lexoffice**. It gives an MCP client (Claude, n8n, or any other MCP host) 36 tools for invoices, quotations, contacts, credit notes, dunnings, articles, recurring templates, vouchers (Belege) and financial queries, all through the official Lexware Office REST API. It is meant for freelancers and small businesses who already keep their books in Lexware Office and want an assistant to draft invoices, capture receipts and check who still owes them money.
+An MCP server for **Lexware Office**, the German accounting service formerly called **Lexoffice**. It gives an MCP client (Claude, n8n, or any other MCP host) 35 tools for invoices, quotations, contacts, credit notes, dunnings, articles, recurring templates, vouchers (Belege) and financial queries, all through the official Lexware Office REST API. It is meant for freelancers and small businesses who already keep their books in Lexware Office and want an assistant to draft invoices, capture receipts and check who still owes them money.
 
 Built with [FastMCP](https://github.com/PrefectHQ/fastmcp) 4 (`fastmcp>=4.0.10,<5.0.0`).
 
@@ -92,12 +92,11 @@ Tool failures (bad input, unknown contact, unsupported file type) raise an MCP `
 | Tool | Description |
 |------|-------------|
 | `create_draft_invoice` | Create an invoice from named parameters (recipient, line items, payment terms). Draft by default; `finalize=true` finalizes on create, which assigns the invoice number and cannot be undone. |
-| `delete_draft_invoice` | Delete a draft invoice. Finalized invoices cannot be deleted. |
 | `get_invoice` | Full invoice details with a deep link into Lexware Office. |
 | `get_invoice_pdf` | Render a finalized invoice and return the document file ID. |
 | `list_invoices` | List sales invoices by status; computes `daysOverdue` for overdue items. |
 
-The Lexware Office API only allows finalizing at create time (`POST /invoices?finalize=true`). It has no endpoint to finalize an existing draft or to email an invoice, so this server has no finalize or send tool. Send invoices from the Lexware Office web app.
+The Lexware Office API only allows finalizing at create time (`POST /invoices?finalize=true`). It has no endpoint to finalize an existing draft or to email an invoice, so this server has no finalize or send tool. Send invoices from the Lexware Office web app. The API cannot delete invoices either, drafts included, so there is no delete tool: delete a draft in the web app.
 
 ### Quotations (Angebote)
 

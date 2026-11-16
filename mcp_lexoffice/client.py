@@ -166,9 +166,6 @@ class LexofficeClient:
         )
         return resp.json()
 
-    async def delete_invoice(self, invoice_id: str) -> None:
-        await self._request("DELETE", f"/invoices/{invoice_id}")
-
     async def get_invoice(self, invoice_id: str) -> dict:
         resp = await self._request("GET", f"/invoices/{invoice_id}")
         return resp.json()
@@ -357,8 +354,19 @@ class LexofficeClient:
     # ── Recurring Templates ────────────────────────────────────────
 
     async def list_recurring_templates(self) -> list[dict]:
-        resp = await self._request("GET", "/recurring-templates")
-        return resp.json()
+        """GET /recurring-templates answers a page object ({content: [...], last, ...}),
+        not a bare array (COS-181). Collect the rows of every page."""
+        rows: list[dict] = []
+        page = 0
+        while True:
+            resp = await self._request(
+                "GET", "/recurring-templates", params={"page": page, "size": 250}
+            )
+            data = resp.json()
+            rows.extend(data.get("content") or [])
+            if data.get("last", True):
+                return rows
+            page += 1
 
     async def get_recurring_template(self, template_id: str) -> dict:
         resp = await self._request("GET", f"/recurring-templates/{template_id}")

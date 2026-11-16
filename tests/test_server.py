@@ -254,7 +254,7 @@ async def test_all_tools_registered():
     expected = {
         "get_profile",
         "search_contacts", "get_contact", "create_contact", "update_contact",
-        "create_draft_invoice", "delete_draft_invoice",
+        "create_draft_invoice",
         "get_invoice", "get_invoice_pdf", "list_invoices",
         "upload_voucher", "get_voucher", "update_voucher",
         "list_expenses", "get_financial_overview", "get_payment_status",
@@ -272,7 +272,7 @@ async def test_all_tools_registered():
 
 async def test_tool_count():
     tools = await mcp.list_tools()
-    assert len(tools) == 36
+    assert len(tools) == 35
 
 
 # ── Profile tool ─────────────────────────────────────────────────────
@@ -2327,7 +2327,7 @@ async def test_create_article_tax_rate_override():
 async def test_all_tools_have_annotations():
     """Every tool carries an annotations block with a human title (B)."""
     tools = await mcp.list_tools()
-    assert len(tools) == 36
+    assert len(tools) == 35
     for t in tools:
         assert t.annotations is not None, f"{t.name} missing annotations"
         assert t.annotations.title, f"{t.name} missing annotation title"
@@ -2344,7 +2344,7 @@ async def test_read_tools_marked_read_only():
 async def test_irreversible_tools_marked_destructive():
     """Finalize/send/delete carry destructiveHint so clients can warn before running them."""
     tools = {t.name: t for t in await mcp.list_tools()}
-    for name in ("create_draft_invoice", "create_draft_quotation", "delete_draft_invoice"):
+    for name in ("create_draft_invoice", "create_draft_quotation"):
         assert tools[name].annotations.destructive_hint is True, name
 
 
@@ -2443,14 +2443,14 @@ async def test_typed_output_schema_coverage():
         "create_voucher", "attach_voucher_file", "upload_voucher", "get_recurring_template",
         "find_or_create_contact",
         "list_quotations", "get_contact_invoices", "create_credit_note", "get_invoice_pdf",
-        "render_dunning_pdf", "delete_draft_invoice",
+        "render_dunning_pdf",
         # pass-3: the four bare-array tools now advertise a typed list[Model] schema (additive).
         "list_countries", "list_posting_categories", "list_payment_conditions",
         "list_recurring_templates",
     ]
     for name in typed:
         assert tools[name].output_schema is not None, f"{name} lost its output schema"
-    assert len(typed) >= 35
+    assert len(typed) >= 34
 
 
 async def test_get_payment_status_stays_str_polymorphic():
@@ -2524,8 +2524,6 @@ async def test_array_tool_text_content_backward_compatible(tool_name, method, pa
 
 
 @pytest.mark.parametrize("tool_name,kwargs,ctx_responses,needle", [
-    ("delete_draft_invoice", {"invoice_id": "i"},
-     {"get_invoice": {"id": "i", "voucherStatus": "open"}}, "Only drafts"),
     ("create_contact", {}, {}, "company_name"),
     ("get_payment_status", {}, {}, "invoice_id"),
     ("pursue_quotation_to_invoice", {"quotation_id": "q"},
@@ -2577,7 +2575,7 @@ async def test_get_contact_invoices_guardrails_raise():
 @pytest.mark.parametrize("model_name", [
     "Profile", "Invoice", "VoucherList", "VoucherListEntry", "Contact", "ContactList",
     "Quotation", "Article", "ArticleList", "Voucher", "CreateVoucherResult", "CreditNote",
-    "Dunning", "RecurringTemplate", "DocumentRef", "FileRef", "DeleteResult",
+    "Dunning", "RecurringTemplate", "DocumentRef", "FileRef",
 ])
 def test_models_validate_error_payload(model_name):
     """Every output model must validate the {'error': ...} short-circuit payload (the exact
@@ -2713,7 +2711,7 @@ async def test_read_tools_carry_read_tag_writes_carry_write_tag():
         "create_draft_invoice", "upload_voucher", "create_contact", "update_contact",
         "create_draft_quotation", "pursue_quotation_to_invoice", "create_article",
         "update_article", "update_voucher", "create_voucher", "attach_voucher_file",
-        "find_or_create_contact", "create_credit_note", "delete_draft_invoice",
+        "find_or_create_contact", "create_credit_note",
     )
     for name in reads:
         assert "read" in tools[name].tags, f"{name} missing 'read' tag"

@@ -319,6 +319,50 @@ async def test_filter_vouchers_default_pagination(client, mock_api):
     assert "size=100" in url
 
 
+# ── Recurring templates ──────────────────────────────────────────────
+
+# Shape of GET /v1/recurring-templates from the Lexware API docs (developers.lexware.io,
+# "Retrieve all Recurring Templates"): a page object, not a bare array. Values are the docs'.
+RECURRING_ROW = {
+    "id": "cab021e5-91d3-4e93-a696-56b7f2417547",
+    "organizationId": "a3d94eb4-98bc-429e-b7ad-17f1a8463af9",
+    "title": "Rechnung",
+    "createdDate": "2023-02-10T14:35:40.642+01:00",
+    "updatedDate": "2023-02-10T14:36:49.741+01:00",
+    "address": {"contactId": "464f4881-7a8c-4dc4-87de-7c6fd9a506b8", "name": "Bike & Ride GmbH & Co. KG"},
+    "totalPrice": {"currency": "EUR", "totalNetAmount": 251.26, "totalGrossAmount": 299},
+    "recurringTemplateSettings": {
+        "id": "615a8db3-bce1-4e11-8302-328fcbacd613", "startDate": "2023-04-01",
+        "endDate": "2024-04-01", "finalize": False, "shippingType": "serviceperiod",
+        "retroactiveInvoice": False, "executionInterval": "QUARTERLY", "nextExecutionDate": None,
+        "lastExecutionDate": None, "lastExecutionFailed": False, "executionStatus": "PAUSED",
+    },
+}
+
+
+def _recurring_page(rows, *, number, last):
+    return {
+        "content": rows, "first": number == 0, "last": last, "totalPages": 2,
+        "totalElements": 2, "numberOfElements": len(rows), "size": 250, "number": number,
+        "sort": [{"property": "createdDate", "direction": "DESC", "ignoreCase": False,
+                  "nullHandling": "NATIVE", "ascending": False}],
+    }
+
+
+async def test_list_recurring_templates_reads_every_page(client, mock_api):
+    """COS-181: the endpoint answers a page object; the client returns the rows of all pages
+    (iterating the page dict handed pydantic the key 'content')."""
+    second = {**RECURRING_ROW, "id": "ac1d66a8-6d59-408b-9413-d56b1db7946f"}
+    route = mock_api.get("/recurring-templates").mock(side_effect=[
+        httpx.Response(200, json=_recurring_page([RECURRING_ROW], number=0, last=False)),
+        httpx.Response(200, json=_recurring_page([second], number=1, last=True)),
+    ])
+    rows = await client.list_recurring_templates()
+    assert [r["id"] for r in rows] == [RECURRING_ROW["id"], second["id"]]
+    assert [c.request.url.params["page"] for c in route.calls] == ["0", "1"]
+    assert route.calls[0].request.url.params["size"] == "250"
+
+
 # ── Files ────────────────────────────────────────────────────────────
 
 

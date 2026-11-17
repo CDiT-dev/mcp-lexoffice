@@ -331,6 +331,70 @@ async def test_create_draft_invoice_on_gross_account_sends_gross_prices():
     }
 
 
+async def test_create_draft_invoice_us_client_options():
+    from mcp_lexoffice.server import create_draft_invoice
+
+    ctx = make_ctx({"create_invoice": {"id": "inv-us"}}, tax_type="net")
+    await create_draft_invoice(
+        ctx,
+        recipient_name="StoryKeep Inc.",
+        contact_id="c-1",
+        line_items=[{"name": "Setup", "unit_price": 3750}],
+        language="en",
+        tax_type="thirdPartyCountryService",
+        tax_type_note="Not subject to German VAT",
+        voucher_date="2026-12-01",
+        shipping_date="2026-12-01",
+        payment_term_duration=15,
+        payment_term_label="Payment due in {paymentRange} days, by {dueDate}",
+        print_layout_id="layout-1",
+    )
+    data = ctx.lifespan_context["lexoffice"].create_invoice.call_args[0][0]
+    assert data["language"] == "en"
+    assert data["taxConditions"] == {
+        "taxType": "thirdPartyCountryService",
+        "taxTypeNote": "Not subject to German VAT",
+    }
+    assert data["lineItems"][0]["unitPrice"]["taxRatePercentage"] == 0
+    assert data["voucherDate"] == "2026-12-01T00:00:00.000+01:00"
+    assert data["shippingConditions"] == {
+        "shippingType": "delivery",
+        "shippingDate": "2026-12-01T00:00:00.000+01:00",
+    }
+    assert data["paymentConditions"]["paymentTermLabel"] == "Payment due in 15 days, by 16.12.2026"
+    assert data["paymentConditions"]["paymentTermLabelTemplate"].startswith("Payment due")
+    assert data["printLayoutId"] == "layout-1"
+
+
+async def test_create_draft_invoice_defaults_unchanged_without_options():
+    from mcp_lexoffice.server import create_draft_invoice
+
+    ctx = make_ctx({"create_invoice": {"id": "inv-d"}})
+    await create_draft_invoice(
+        ctx, recipient_name="Acme", line_items=[{"name": "A", "unit_price": 1}],
+        payment_term_duration=14,
+    )
+    data = ctx.lifespan_context["lexoffice"].create_invoice.call_args[0][0]
+    assert "language" not in data and "printLayoutId" not in data
+    assert data["shippingConditions"] == {"shippingType": "none"}
+    assert data["paymentConditions"]["paymentTermLabel"] == "14 Tage"
+
+
+async def test_create_draft_invoice_rejects_bad_date_and_orphan_label():
+    from fastmcp.exceptions import ToolError
+
+    from mcp_lexoffice.server import create_draft_invoice
+
+    ctx = make_ctx({"create_invoice": {"id": "x"}})
+    item = [{"name": "A", "unit_price": 1}]
+    with pytest.raises(ToolError):
+        await create_draft_invoice(ctx, recipient_name="A", line_items=item, voucher_date="1 Dec")
+    with pytest.raises(ToolError):
+        await create_draft_invoice(
+            ctx, recipient_name="A", line_items=item, payment_term_label="Due {dueDate}"
+        )
+
+
 async def test_create_draft_invoice_deep_link_is_edit():
     from mcp_lexoffice.server import create_draft_invoice
 

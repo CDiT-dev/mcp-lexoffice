@@ -5,8 +5,9 @@ import json
 import logging
 import os
 from contextlib import asynccontextmanager
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Annotated, Any, Literal
+from zoneinfo import ZoneInfo
 
 import fastmcp.server.http as _fastmcp_http
 import httpx
@@ -664,6 +665,37 @@ async def get_profile(ctx: Context) -> Profile:
 # ── Invoices ─────────────────────────────────────────────────────────
 
 
+InvoiceTaxType = Literal[
+    "net", "gross", "vatfree", "intraCommunitySupply", "constructionService13b",
+    "externalService13b", "thirdPartyCountryService", "thirdPartyCountryDelivery",
+]
+
+
+def _berlin_iso(value: str) -> str:
+    """Date or datetime string to the API's RFC 3339 form; a bare date means Berlin midnight."""
+    try:
+        d = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise ToolError(f"'{value}' is not an ISO date (YYYY-MM-DD) or datetime") from exc
+    if d.tzinfo is None:
+        d = d.replace(tzinfo=ZoneInfo("Europe/Berlin"))
+    return d.isoformat(timespec="milliseconds")
+
+
+def _payment_conditions(days: int, template: str | None, voucher_date: str) -> dict[str, Any]:
+    """Payment term. A template such as 'Payment due in {paymentRange} days, by {dueDate}' is
+    rendered into the label and also sent as paymentTermLabelTemplate."""
+    if not template:
+        return {"paymentTermLabel": f"{days} Tage", "paymentTermDuration": days}
+    due = (datetime.fromisoformat(voucher_date) + timedelta(days=days)).strftime("%d.%m.%Y")
+    label = template.replace("{paymentRange}", str(days)).replace("{dueDate}", due)
+    return {
+        "paymentTermLabel": label,
+        "paymentTermLabelTemplate": template,
+        "paymentTermDuration": days,
+    }
+
+
 @mcp.tool(
     tags={"finance", "invoice", "write", "irreversible"},
     annotations=ToolAnnotations(
@@ -698,37 +730,79 @@ async def create_draft_invoice(
         "Finalize on create (assigns the number, locks the document). NOT reversible. "
         "Only set when the user explicitly asked to finalize.",
     ] = False,
+    language: Annotated[
+        Literal["de", "en"] | None,
+        "Print language of the document. Lexoffice supports only de (its default) and en.",
+    ] = None,
+    tax_type: Annotated[
+        InvoiceTaxType | None,
+        "Override the profile's tax type, e.g. thirdPartyCountryService for a US client "
+        "(needs contact_id). Non-net/gross types force a 0% rate.",
+    ] = None,
+    tax_type_note: Annotated[
+        str | None, "Note printed for vat-free tax types. Omitted: the account's default note."
+    ] = None,
+    voucher_date: Annotated[
+        str | None, "Invoice date, YYYY-MM-DD (Berlin) or a full ISO datetime. Default: now."
+    ] = None,
+    shipping_date: Annotated[
+        str | None, "Delivery/service date, YYYY-MM-DD. Sets shippingType to delivery."
+    ] = None,
+    payment_term_label: Annotated[
+        str | None,
+        "Template for the payment line, e.g. 'Payment due in {paymentRange} days, by {dueDate}'. "
+        "Needs payment_term_duration. Default label is German ('N Tage').",
+    ] = None,
+    print_layout_id: Annotated[str | None, "Lexoffice print layout (Briefpapier) UUID"] = None,
 ) -> Invoice:
     """[finance] Create an invoice in Lexware Office. Returns the invoice ID and a deep link.
 
     Default is a draft. finalize=true finalizes on create (Lexoffice only supports finalizing
     at creation time); that is irreversible. Sending is done in the Lexoffice UI.
     Line items example: [{"name": "IT Consulting", "unit_price": 3000, "quantity": 1}]
-    Tax regime is auto-detected from the Lexoffice profile. Override per-item via tax_rate field.
+    Tax regime is auto-detected from the Lexoffice profile; tax_type overrides it, tax_rate
+    overrides the rate. Without language the document prints German; set language="en" for
+    English clients. A draft cannot be changed through the API afterwards, so set these here.
     """
     tax_config = await _get_tax_config(ctx)
-    effective_rate = tax_rate if tax_rate is not None else tax_config["default_rate"]
+    effective_type = tax_type or tax_config["tax_type"]
+    default_rate = DEFAULT_TAX_RATE.get(effective_type, 0) if tax_type else tax_config["default_rate"]
+    effective_rate = tax_rate if tax_rate is not None else default_rate
     address = {"contactId": contact_id} if contact_id else _build_address(recipient_name, street, zip_code, city, country_code)
     data: dict[str, Any] = {
-        "voucherDate": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.000+00:00"),
+        "voucherDate": _berlin_iso(voucher_date)
+        if voucher_date
+        else datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.000+00:00"),
         "address": address,
         "lineItems": _build_line_items(
-            line_items, default_tax_rate=effective_rate, tax_type=tax_config["tax_type"]
+            line_items, default_tax_rate=effective_rate, tax_type=effective_type
         ),
         "totalPrice": {"currency": currency},
-        "taxConditions": {"taxType": tax_config["tax_type"]},
+        "taxConditions": {"taxType": effective_type},
         "shippingConditions": {"shippingType": "none"},
         "title": title,
     }
+    if tax_type_note:
+        data["taxConditions"]["taxTypeNote"] = tax_type_note
+    if shipping_date:
+        data["shippingConditions"] = {
+            "shippingType": "delivery",
+            "shippingDate": _berlin_iso(shipping_date),
+        }
+    if language:
+        data["language"] = language
+    if print_layout_id:
+        data["printLayoutId"] = print_layout_id
     if introduction:
         data["introduction"] = introduction
     if remark:
         data["remark"] = remark
     if payment_term_duration:
-        data["paymentConditions"] = {
-            "paymentTermLabel": f"{payment_term_duration} Tage",
-            "paymentTermDuration": payment_term_duration,
-        }
+        data["paymentConditions"] = _payment_conditions(
+            payment_term_duration, payment_term_label, data["voucherDate"]
+        )
+    elif payment_term_label:
+        raise ToolError("payment_term_label needs payment_term_duration")
 
     result = await _client(ctx).create_invoice(data, finalize=finalize)
     invoice_id = result.get("id", "")

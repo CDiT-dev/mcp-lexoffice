@@ -32,6 +32,7 @@ MCP_TRANSPORT=stdio uv run mcp-lexoffice
 - Override with `LEXOFFICE_TAX_TYPE` env var for testing (skips API call)
 - Lazy-cached in `lifespan_context` — server restart clears cache
 - Per-item `tax_rate` override available on invoices, quotations, and articles
+- `create_draft_invoice` also takes `language` (de|en, the only two the API prints), `tax_type` (e.g. `thirdPartyCountryService` for a US client; needs `contact_id`), `tax_type_note`, `voucher_date`, `shipping_date`, `payment_term_label` and `print_layout_id`. A draft cannot be edited through the API, so set them at creation (CDI-2178)
 - Default payment terms: "Zahlbar sofort, rein netto"
 
 ## Tools (35 total)
